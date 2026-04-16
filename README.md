@@ -42,6 +42,20 @@ hermes memory setup        # select "mem9" in the picker
 
 During `hermes memory setup` you can auto-provision a free API key or enter an existing one. The setup flow tests the connection before saving.
 
+## Upgrade
+
+```bash
+hermes plugins update mem9
+```
+
+This runs `git pull` inside the installed plugin directory. Start a new Hermes session to pick up the changes. Your `.env` and `mem9.json` are not touched.
+
+If the symlink is missing after an upgrade (e.g. Hermes was reinstalled), re-run:
+
+```bash
+bash "${HERMES_HOME:-$HOME/.hermes}/plugins/mem9/scripts/link-memory-provider.sh"
+```
+
 ## Verify
 
 ```bash
@@ -88,5 +102,5 @@ hermes config set memory.provider ""
 |---------|-----|
 | `hermes memory status` doesn't show mem9 | Run `link-memory-provider.sh` — the symlink may be missing |
 | "mem9 is not configured" during chat | Check that `MEM9_API_KEY` is set in `HERMES_HOME/.env` |
-| Memories not appearing | Wait one turn — recall is prefetched asynchronously after the first turn |
+| Memories not appearing | Check `hermes memory status` and `agent.log` for errors; recall runs every turn including the first |
 | Connection errors | Verify `MEM9_API_URL` and check `HERMES_HOME/logs/agent.log` with `logging.level: DEBUG` in `config.yaml` |
