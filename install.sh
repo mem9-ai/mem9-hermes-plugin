@@ -394,8 +394,9 @@ if [ -z "$api_key" ]; then
 fi
 
 api_verified=1
+api_is_new=0
 if [ -n "$api_key" ]; then
-  success "reusing existing MEM9_API_KEY"
+  success "found existing MEM9_API_KEY — keeping it"
   if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
     warn "existing API key failed connectivity check (network issue or wrong MEM9_API_URL?)"
     warn "keeping existing key — skipping activation"
@@ -403,14 +404,23 @@ if [ -n "$api_key" ]; then
   fi
 else
   api_key="$(create_api_key)"
+  api_is_new=1
   success "created a new MEM9_API_KEY"
 fi
 
 upsert_env_value "MEM9_API_KEY" "$api_key" "$HERMES_ENV_FILE"
-success "saved MEM9_API_KEY to $HERMES_ENV_FILE"
+if [ "$api_is_new" = "1" ]; then
+  success "saved MEM9_API_KEY to $HERMES_ENV_FILE"
+else
+  success "MEM9_API_KEY unchanged in $HERMES_ENV_FILE"
+fi
 
 write_provider_config "$hermes_python"
-success "saved mem9 config to $MEM9_CONFIG_FILE"
+if [ -f "$MEM9_CONFIG_FILE" ] && [ "$api_is_new" = "0" ]; then
+  success "mem9 config up to date in $MEM9_CONFIG_FILE"
+else
+  success "saved mem9 config to $MEM9_CONFIG_FILE"
+fi
 
 ensure_memory_symlink "$hermes_project_root"
 

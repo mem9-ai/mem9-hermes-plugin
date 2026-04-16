@@ -814,6 +814,52 @@ class TestPostSetupGate:
         assert saved_config["api_url"] == "https://custom.server.com"
         assert saved_config["agent_id"] == "my-agent"
 
+    def test_keep_existing_key_skips_reprompt(self, tmp_path):
+        """Switching back to mem9 with an existing API key should offer
+        'Keep existing' and skip autoprovision/manual entry entirely."""
+        p = Mem9MemoryProvider()
+        config = {}
+        written_env: dict = {}
+
+        def capture_env(env_path, env_writes):
+            written_env.update(env_writes)
+
+        p.save_config = lambda values, hermes_home: None
+
+        with patch.dict(os.environ, {"MEM9_API_KEY": "sk-existing-key"}, clear=True), \
+             patch("hermes_cli.memory_setup._curses_select", return_value=0) as mock_select, \
+             patch("hermes_cli.memory_setup._write_env_vars", side_effect=capture_env), \
+             patch("hermes_cli.config.save_config"), \
+             patch("mem9._Mem9Client.search", return_value={"memories": []}), \
+             patch("mem9._Mem9Client.close"), \
+             patch("builtins.input", return_value=""):
+            p.post_setup(str(tmp_path), config)
+
+        items_arg = mock_select.call_args[0][1]
+        assert items_arg[0][0] == "Keep existing"
+        assert "MEM9_API_KEY" not in written_env
+
+    def test_keep_existing_key_from_dotenv_file(self, tmp_path):
+        """Key found only in .env file (not os.environ) should offer 'Keep existing'."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("MEM9_API_KEY=sk-from-dotenv\n")
+
+        p = Mem9MemoryProvider()
+        config = {}
+        p.save_config = lambda values, hermes_home: None
+
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("hermes_cli.memory_setup._curses_select", return_value=0) as mock_select, \
+             patch("hermes_cli.memory_setup._write_env_vars"), \
+             patch("hermes_cli.config.save_config"), \
+             patch("mem9._Mem9Client.search", return_value={"memories": []}), \
+             patch("mem9._Mem9Client.close"), \
+             patch("builtins.input", return_value=""):
+            p.post_setup(str(tmp_path), config)
+
+        items_arg = mock_select.call_args[0][1]
+        assert items_arg[0][0] == "Keep existing"
+
 
 # ---------------------------------------------------------------------------
 # on_session_end — full smart ingest at session boundary
