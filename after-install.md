@@ -1,6 +1,13 @@
-# Finish mem9 Setup
+# mem9 Plugin — Post-Install Steps
 
-`hermes plugins install` has placed the plugin files into your Hermes plugin directory, but Hermes discovers memory providers from a separate path (`plugins/memory/` inside the Hermes repo). Two more steps are needed:
+> **Used `install.sh`?** Everything below is already done — no action needed.
+> The steps below are only for manual `hermes plugins install` users.
+
+---
+
+`hermes plugins install` places the plugin files into your Hermes plugin directory,
+but Hermes discovers memory providers from a separate path (`plugins/memory/`
+inside the Hermes repo). Two more steps are needed:
 
 ## 1. Create the symlink
 
@@ -8,15 +15,7 @@
 bash "${HERMES_HOME:-$HOME/.hermes}/plugins/mem9/scripts/link-memory-provider.sh"
 ```
 
-Expected output:
-
-```
--> using HERMES_HOME=~/.hermes
--> using Hermes project root /path/to/hermes-agent
-OK linked mem9 into /path/to/hermes-agent/plugins/memory/mem9
-```
-
-If the script cannot find your Hermes repo, set `HERMES_PROJECT_ROOT` explicitly:
+If the script cannot find your Hermes repo, set `HERMES_PROJECT_ROOT`:
 
 ```bash
 HERMES_PROJECT_ROOT=/path/to/hermes-agent \
@@ -33,10 +32,8 @@ hermes memory setup
 - Choose auto-provision (recommended) or enter an existing API key
 - The setup tests your connection before saving
 
-After successful setup:
+## Verify
 
 ```bash
 hermes memory status   # should show mem9 as active
 ```
-
-Start a new Hermes session and mem9 will begin capturing and recalling memories.

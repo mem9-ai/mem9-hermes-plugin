@@ -44,7 +44,6 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
-_PREFETCH_TIMEOUT_SECONDS = 8.0
 
 # Recall injection — match openclaw plugin constants.
 _MAX_INJECT = 10
@@ -352,7 +351,7 @@ def _load_config() -> dict:
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             config.update({k: v for k, v in file_cfg.items()
-                           if v is not None and v != ""})
+                           if k != "api_key" and v is not None and v != ""})
         except Exception:
             pass
 
@@ -497,7 +496,9 @@ class Mem9MemoryProvider(MemoryProvider):
                 existing = json.loads(config_path.read_text())
             except Exception:
                 pass
-        existing.update(values)
+        existing.pop("api_key", None)
+        safe = {k: v for k, v in values.items() if k != "api_key"}
+        existing.update(safe)
         config_path.write_text(json.dumps(existing, indent=2))
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
@@ -534,19 +535,44 @@ class Mem9MemoryProvider(MemoryProvider):
 
         print("\n  Configuring mem9 memory:\n")
 
-        items = [
-            ("Auto-provision", "Create a free tenant automatically (recommended)"),
-            ("Manual", "Enter an existing API key from mem9.ai"),
-        ]
-        choice = _curses_select("  Setup mode", items, default=0)
-
         env_path = Path(hermes_home) / ".env"
         env_writes: dict = {}
         provider_config: dict = {}
         api_key = ""
 
-        if choice == 0:
-            # Autoprovision
+        existing_key = os.environ.get("MEM9_API_KEY", "")
+        if not existing_key:
+            try:
+                for line in env_path.read_text().splitlines():
+                    line = line.strip()
+                    if line.startswith("MEM9_API_KEY="):
+                        existing_key = line.split("=", 1)[1].strip().strip("'\"")
+                        break
+            except Exception:
+                pass
+        if existing_key:
+            masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "***"
+            items = [
+                ("Keep existing", f"Reuse current API key ({masked})"),
+                ("Auto-provision", "Create a new free tenant"),
+                ("Manual", "Enter a different API key"),
+            ]
+            choice = _curses_select("  Setup mode", items, default=0)
+            if choice == 0:
+                api_key = existing_key
+                print(f"\n  ✓ Using existing API key ({masked})")
+            elif choice == 1:
+                choice = 0  # fall through to autoprovision below
+            else:
+                choice = 1  # fall through to manual below
+        else:
+            items = [
+                ("Auto-provision", "Create a free tenant automatically (recommended)"),
+                ("Manual", "Enter an existing API key from mem9.ai"),
+            ]
+            choice = _curses_select("  Setup mode", items, default=0)
+
+        if not api_key and choice == 0:
             api_url = _DEFAULT_API_URL
             print("\n  Provisioning mem9 tenant...")
             try:
@@ -561,21 +587,11 @@ class Mem9MemoryProvider(MemoryProvider):
                 print(f"  ✗ Provisioning failed: {e}")
                 print("  Try manual setup or check https://mem9.ai")
                 return
-        else:
-            # Manual key entry
+        elif not api_key and choice == 1:
             print("\n  Get your API key at https://mem9.ai\n")
-            existing_key = os.environ.get("MEM9_API_KEY", "")
-            if existing_key:
-                masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "set"
-                sys.stdout.write(f"  API key (current: {masked}, blank to keep): ")
-                sys.stdout.flush()
-                api_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
-                if not api_key:
-                    api_key = existing_key
-            else:
-                sys.stdout.write("  API key: ")
-                sys.stdout.flush()
-                api_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
+            sys.stdout.write("  API key: ")
+            sys.stdout.flush()
+            api_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
             if api_key:
                 env_writes["MEM9_API_KEY"] = api_key
 
@@ -753,8 +769,7 @@ class Mem9MemoryProvider(MemoryProvider):
         if not client or self._is_breaker_open() or not query:
             return ""
         try:
-            resp = client.search(query[:200], limit=_MAX_INJECT,
-                                timeout=_PREFETCH_TIMEOUT_SECONDS)
+            resp = client.search(query[:200], limit=_MAX_INJECT)
             memories = resp.get("memories") or []
             if memories:
                 block = _format_memories_block(memories)
