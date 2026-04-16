@@ -255,6 +255,7 @@ if config_path.exists():
     except Exception:
         existing = {}
 
+existing.pop("api_key", None)
 existing["api_url"] = api_url
 existing["agent_id"] = agent_id
 

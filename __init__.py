@@ -352,7 +352,7 @@ def _load_config() -> dict:
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             config.update({k: v for k, v in file_cfg.items()
-                           if v is not None and v != ""})
+                           if k != "api_key" and v is not None and v != ""})
         except Exception:
             pass
 
@@ -497,7 +497,9 @@ class Mem9MemoryProvider(MemoryProvider):
                 existing = json.loads(config_path.read_text())
             except Exception:
                 pass
-        existing.update(values)
+        existing.pop("api_key", None)
+        safe = {k: v for k, v in values.items() if k != "api_key"}
+        existing.update(safe)
         config_path.write_text(json.dumps(existing, indent=2))
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
