@@ -44,7 +44,6 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
-_PREFETCH_TIMEOUT_SECONDS = 8.0
 
 # Recall injection — match openclaw plugin constants.
 _MAX_INJECT = 10
@@ -770,8 +769,7 @@ class Mem9MemoryProvider(MemoryProvider):
         if not client or self._is_breaker_open() or not query:
             return ""
         try:
-            resp = client.search(query[:200], limit=_MAX_INJECT,
-                                timeout=_PREFETCH_TIMEOUT_SECONDS)
+            resp = client.search(query[:200], limit=_MAX_INJECT)
             memories = resp.get("memories") or []
             if memories:
                 block = _format_memories_block(memories)

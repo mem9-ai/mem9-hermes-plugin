@@ -352,7 +352,7 @@ class TestPrefetch:
         p._client = mock_client
         result = p.prefetch("theme preferences")
         mock_client.search.assert_called_once_with(
-            "theme preferences", limit=10, timeout=8.0,
+            "theme preferences", limit=10,
         )
         assert "<relevant-memories>" in result
         assert "dark mode" in result
