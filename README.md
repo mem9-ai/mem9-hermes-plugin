@@ -21,7 +21,7 @@ This single command:
 
 1. Installs the plugin via `hermes plugins install`
 2. Creates a symlink at `plugins/memory/mem9` inside the Hermes repo
-3. Obtains an API key — reuses an existing `MEM9_API_KEY` (with a connectivity check), or creates a new one if none exists
+3. During interactive install, if `.env` already has `MEM9_API_KEY`, it asks whether to use that key, create a new one, or enter another existing key; otherwise it asks whether to paste a key or create one
 4. Saves credentials to `HERMES_HOME/.env` and config to `mem9.json`
 5. Activates `memory.provider=mem9` (skipped if the connectivity check failed)
 

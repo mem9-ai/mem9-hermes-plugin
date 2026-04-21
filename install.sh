@@ -40,6 +40,105 @@ require_cmd() {
   have_cmd "$1" || fail "missing required command: $1"
 }
 
+can_prompt_user() {
+  [ -r /dev/tty ] && [ -w /dev/tty ]
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default_answer="$2"
+  local reply=""
+
+  while true; do
+    printf '%s' "$prompt" >/dev/tty
+    IFS= read -r reply </dev/tty || return 1
+
+    if [ -z "$reply" ]; then
+      reply="$default_answer"
+    fi
+
+    case "$reply" in
+        return 0
+        ;;
+      [Nn]|[Nn][Oo])
+        return 1
+        ;;
+      *)
+        printf 'Please answer yes or no.\n' >/dev/tty
+        ;;
+    esac
+  done
+}
+
+prompt_saved_api_key_action() {
+  local reply=""
+
+  while true; do
+    printf '%s\n' "A saved MEM9_API_KEY already exists in $HERMES_ENV_FILE." >/dev/tty
+    printf '%s\n' "Choose how to continue:" >/dev/tty
+    printf '%s\n' "  1) Use the existing MEM9_API_KEY from .env" >/dev/tty
+    printf '%s\n' "  2) Create a new MEM9_API_KEY" >/dev/tty
+    printf '%s\n' "  3) Enter a different existing MEM9_API_KEY" >/dev/tty
+    printf '%s' "Select [1/2/3] (default: 1): " >/dev/tty
+    IFS= read -r reply </dev/tty || return 1
+
+    if [ -z "$reply" ]; then
+      reply="1"
+    fi
+
+    case "$reply" in
+      1)
+        printf '%s\n' "use_saved"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "create_new"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "enter_other"
+        return 0
+        ;;
+      *)
+        printf '%s\n' "Please enter 1, 2, or 3." >/dev/tty
+        ;;
+    esac
+  done
+}
+
+prompt_for_api_key() {
+  local existing_key="$1"
+  local entered_key=""
+
+  while true; do
+    if [ -n "$existing_key" ]; then
+      printf 'Enter your mem9 API key (press Enter to keep the saved key): ' >/dev/tty
+    else
+      printf 'Enter your mem9 API key: ' >/dev/tty
+    fi
+
+    IFS= read -r -s entered_key </dev/tty || return 1
+    printf '\n' >/dev/tty
+
+    if [ -n "$entered_key" ]; then
+      printf '%s\n' "$entered_key"
+      return 0
+    fi
+
+    if [ -n "$existing_key" ]; then
+      printf '%s\n' "$existing_key"
+      return 0
+    fi
+
+    printf 'An API key is required to continue.\n' >/dev/tty
+  done
+}
+
+mark_api_key_unverified() {
+  warn "API key failed connectivity check (network issue or wrong MEM9_API_URL?)"
+  warn "saving the key but skipping activation"
+}
+
 is_hermes_project_root() {
   local candidate="$1"
   [ -n "$candidate" ] || return 1
@@ -388,31 +487,80 @@ if [ -z "$MEM9_AGENT_ID" ]; then
   MEM9_AGENT_ID="${existing_agent_id:-$DEFAULT_AGENT_ID}"
 fi
 
-api_key="${MEM9_API_KEY:-}"
-if [ -z "$api_key" ]; then
-  api_key="$(read_env_value "MEM9_API_KEY" "$HERMES_ENV_FILE")"
-fi
+saved_api_key="$(read_env_value "MEM9_API_KEY" "$HERMES_ENV_FILE")"
+api_key="${MEM9_API_KEY:-$saved_api_key}"
 
 api_verified=1
 api_is_new=0
-if [ -n "$api_key" ]; then
+if [ -n "${MEM9_API_KEY:-}" ]; then
+  success "found MEM9_API_KEY in the current environment — keeping it"
+  if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
+    mark_api_key_unverified
+    api_verified=0
+  fi
+elif can_prompt_user; then
+  if [ -n "$saved_api_key" ]; then
+    info "a saved MEM9_API_KEY was found in $HERMES_ENV_FILE"
+    saved_key_action="$(prompt_saved_api_key_action)" || fail "unable to read your API key selection from the terminal"
+
+    case "$saved_key_action" in
+      use_saved)
+        api_key="$saved_api_key"
+        success "using the existing MEM9_API_KEY from $HERMES_ENV_FILE"
+        if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
+          mark_api_key_unverified
+          api_verified=0
+        fi
+        ;;
+      create_new)
+        api_key="$(create_api_key)"
+        api_is_new=1
+        success "created a new MEM9_API_KEY"
+        ;;
+      enter_other)
+        api_key="$(prompt_for_api_key "")" || fail "unable to read MEM9_API_KEY from the terminal"
+        success "using the provided MEM9_API_KEY"
+        if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
+          mark_api_key_unverified
+          api_verified=0
+        fi
+        ;;
+      *)
+        fail "unsupported API key selection: $saved_key_action"
+        ;;
+    esac
+  else
+    if prompt_yes_no "Do you already have a mem9 API key? [y/N]: " "n"; then
+      api_key="$(prompt_for_api_key "")" || fail "unable to read MEM9_API_KEY from the terminal"
+      success "using the provided MEM9_API_KEY"
+      if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
+        mark_api_key_unverified
+        api_verified=0
+      fi
+    else
+      api_key="$(create_api_key)"
+      api_is_new=1
+      success "created a new MEM9_API_KEY"
+    fi
+  fi
+elif [ -n "$api_key" ]; then
   success "found existing MEM9_API_KEY — keeping it"
   if ! verify_api_key "$api_key" "$MEM9_API_URL"; then
-    warn "existing API key failed connectivity check (network issue or wrong MEM9_API_URL?)"
-    warn "keeping existing key — skipping activation"
+    mark_api_key_unverified
     api_verified=0
   fi
 else
+  warn "no interactive terminal detected; creating a new MEM9_API_KEY automatically"
   api_key="$(create_api_key)"
   api_is_new=1
   success "created a new MEM9_API_KEY"
 fi
 
 upsert_env_value "MEM9_API_KEY" "$api_key" "$HERMES_ENV_FILE"
-if [ "$api_is_new" = "1" ]; then
-  success "saved MEM9_API_KEY to $HERMES_ENV_FILE"
-else
+if [ -n "$saved_api_key" ] && [ "$saved_api_key" = "$api_key" ]; then
   success "MEM9_API_KEY unchanged in $HERMES_ENV_FILE"
+else
+  success "saved MEM9_API_KEY to $HERMES_ENV_FILE"
 fi
 
 write_provider_config "$hermes_python"
