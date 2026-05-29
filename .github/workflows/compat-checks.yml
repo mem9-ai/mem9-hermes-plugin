@@ -1,0 +1,33 @@
+name: Compatibility checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermes-contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest httpx
+
+      - name: Run provider tests
+        run: python3 -m pytest -q tests/test_mem9.py
+
+      - name: Check shell scripts
+        run: bash -n install.sh scripts/link-memory-provider.sh
