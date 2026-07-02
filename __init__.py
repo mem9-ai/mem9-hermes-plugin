@@ -64,6 +64,11 @@ _INJECTED_BLOCK_RE = re.compile(
     r"</(?:relevant-memories|memory-context)>",
     re.DOTALL,
 )
+_QUOTA_CODES = {
+    "quota_exhausted",
+    "spending_limit_exceeded",
+    "runtime_quota_denied",
+}
 
 
 def _normalize_timeout_seconds(value: Any, default: float) -> float:
@@ -75,6 +80,159 @@ def _normalize_timeout_seconds(value: Any, default: float) -> float:
     if timeout <= 0:
         return default
     return timeout
+
+
+class _Mem9RuntimeQuotaError(Exception):
+    """mem9 runtime quota denial with plugin-facing action details."""
+
+    def __init__(self, status_code: int, payload: dict, body: str = ""):
+        self.status_code = status_code
+        self.payload = payload
+        self.body = body
+        self.code = str(payload.get("code") or "runtime_quota_denied")
+        self.message = str(payload.get("message") or "runtime usage quota denied")
+        details = payload.get("details")
+        self.details = details if isinstance(details, dict) else {}
+        self.meter = str(self.details.get("meter") or "").strip()
+        self.recommended_action = _normalize_recommended_action(self.details)
+        super().__init__(self.message)
+
+
+def _normalize_recommended_action(details: dict) -> Optional[dict]:
+    nested = details.get("recommendedAction")
+    action = nested if isinstance(nested, dict) else {}
+    binding_state = str(action.get("bindingState") or details.get("bindingState") or "").strip()
+    action_type = str(action.get("type") or details.get("upgradeAction") or "").strip()
+    url = str(action.get("url") or details.get("upgradeUrl") or "").strip()
+    if not binding_state and not action_type and not url:
+        return None
+    result: dict = {}
+    if binding_state:
+        result["bindingState"] = binding_state
+    if action_type:
+        result["type"] = action_type
+    if url:
+        result["url"] = url
+    return result
+
+
+def _is_runtime_quota_payload(payload: dict) -> bool:
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    mem9_code = str(
+        details.get("mem9Code") or details.get("mem9_code") or payload.get("mem9_code") or ""
+    ).strip()
+    code = str(payload.get("code") or "").strip()
+    return mem9_code == "runtime_quota_denied" or code in _QUOTA_CODES
+
+
+def _quota_reason(error: _Mem9RuntimeQuotaError) -> str:
+    action_type = str((error.recommended_action or {}).get("type") or "").strip()
+    if action_type == "claimApiKey":
+        return "the included usage quota for this API key has been used up"
+    if action_type == "increaseSpendingLimit" or error.code == "spending_limit_exceeded":
+        return "the configured spending limit would be exceeded"
+    if action_type == "enableOnDemand":
+        return "the included usage quota has been used up and on-demand usage is not enabled"
+    if action_type == "upgradePlan" or error.code == "quota_exhausted":
+        return "the included usage quota for this mem9 account has been used up"
+    return "the runtime quota check blocked this request"
+
+
+def _quota_notice_subject(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
+    if error.meter == "memory_write_requests":
+        return {
+            "headline": "Mem9 memory saving is temporarily unavailable",
+            "userState": "mem9 cannot save new memories right now",
+        }
+    if error.meter == "memory_recall_requests":
+        return {
+            "headline": "Mem9 recall is temporarily unavailable",
+            "userState": "mem9 cannot recall memories right now",
+        }
+
+    operation_text = operation.lower()
+    if re.search(r"\b(ingest|save|store|write)\b", operation_text):
+        return {
+            "headline": "Mem9 memory saving is temporarily unavailable",
+            "userState": "mem9 cannot save new memories right now",
+        }
+    if re.search(r"\b(recall|search)\b", operation_text):
+        return {
+            "headline": "Mem9 recall is temporarily unavailable",
+            "userState": "mem9 cannot recall memories right now",
+        }
+    return {
+        "headline": "Mem9 memory is temporarily unavailable",
+        "userState": "mem9 cannot complete the memory request right now",
+    }
+
+
+def _action_instruction(action: Optional[dict]) -> str:
+    action = action or {}
+    action_type = str(action.get("type") or "").strip()
+    action_url = str(action.get("url") or "").strip()
+    if not action_url:
+        return "Ask them to open the mem9 console to resolve the account or billing state."
+
+    if action_type == "claimApiKey":
+        return (
+            "Ask them to open this link to sign in or create a mem9 account and "
+            f"claim this API key: {action_url}. After claiming the key, they can "
+            "upgrade their plan or set up billing to get more usage. Include the "
+            "link exactly as written."
+        )
+    if action_type == "upgradePlan":
+        return (
+            "Ask them to open this link to upgrade their mem9 plan and get more "
+            f"included usage: {action_url}. Include the link exactly as written."
+        )
+    if action_type == "increaseSpendingLimit":
+        return (
+            "Ask them to open this link to increase the mem9 spending limit or "
+            f"adjust billing settings: {action_url}. Include the link exactly as written."
+        )
+    if action_type == "enableOnDemand":
+        return (
+            "Ask them to open this link to enable billing or on-demand usage for "
+            f"mem9: {action_url}. Include the link exactly as written."
+        )
+    return (
+        "Ask them to open this mem9 link to resolve the account or billing state: "
+        f"{action_url}. Include the link exactly as written."
+    )
+
+
+def _format_runtime_quota_notice(error: _Mem9RuntimeQuotaError, operation: str) -> str:
+    subject = _quota_notice_subject(error, operation)
+    return (
+        f"{subject['headline']} because {_quota_reason(error)}. "
+        f"In your reply, briefly tell the user that {subject['userState']}. "
+        f"{_action_instruction(error.recommended_action)}"
+    )
+
+
+def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
+    user_message = _format_runtime_quota_notice(error, operation)
+    payload = {
+        "error": error.message,
+        "user_message": user_message,
+        "status_code": error.status_code,
+        "code": error.code,
+        "quota": {
+            "code": error.code,
+            "message": error.message,
+            "user_message": user_message,
+        },
+    }
+    if error.meter:
+        payload["quota"]["meter"] = error.meter
+    if error.recommended_action:
+        payload["quota"]["recommendedAction"] = error.recommended_action
+        if error.recommended_action.get("url"):
+            payload["action_url"] = error.recommended_action["url"]
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +374,23 @@ class _Mem9Client:
         except Exception:
             return {}
 
+    @staticmethod
+    def _raise_for_status(resp) -> None:
+        status_code = getattr(resp, "status_code", None)
+        if not isinstance(status_code, int):
+            resp.raise_for_status()
+            return
+
+        if status_code < 400:
+            return
+
+        body = getattr(resp, "text", "") or ""
+        payload = _Mem9Client._safe_json(resp)
+        if isinstance(payload, dict) and _is_runtime_quota_payload(payload):
+            raise _Mem9RuntimeQuotaError(status_code, payload, body)
+
+        resp.raise_for_status()
+
     def store(self, content: str, *, tags: List[str] = None,
               session_id: str = "", source: str = "") -> dict:
         """Store a memory. Server returns 202 with ``{"status":"accepted"}``."""
@@ -227,7 +402,7 @@ class _Mem9Client:
         if source:
             body["source"] = source
         resp = self._http.post(f"{self._base}/v1alpha2/mem9s/memories", json=body)
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return self._safe_json(resp)
 
     def ingest(self, messages: List[dict], *, session_id: str = "",
@@ -245,7 +420,7 @@ class _Mem9Client:
         if mode:
             body["mode"] = mode
         resp = self._http.post(f"{self._base}/v1alpha2/mem9s/memories", json=body)
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return self._safe_json(resp)
 
     def search(self, query: str, *, limit: int = 10, tags: str = "",
@@ -268,7 +443,7 @@ class _Mem9Client:
             f"{self._base}/v1alpha2/mem9s/memories", params=params,
             timeout=timeout if timeout is not None else self._search_timeout_seconds,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json()
 
     def get(self, memory_id: str) -> Optional[dict]:
@@ -278,7 +453,7 @@ class _Mem9Client:
         )
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json()
 
     def update(self, memory_id: str, content: str = "",
@@ -295,7 +470,7 @@ class _Mem9Client:
         )
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json()
 
     def delete(self, memory_id: str) -> bool:
@@ -305,7 +480,7 @@ class _Mem9Client:
         )
         if resp.status_code == 404:
             return False
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return True
 
     def close(self) -> None:
@@ -780,6 +955,9 @@ class Mem9MemoryProvider(MemoryProvider):
             logger.info("mem9 prefetch: 0 memories (query=%r)", query[:80])
             self._record_success()
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                logger.warning("mem9 prefetch quota denied: %s", e)
+                return _format_runtime_quota_notice(e, "recall paused")
             self._record_failure()
             logger.warning("mem9 prefetch failed: %s", e)
         return ""
@@ -815,6 +993,9 @@ class Mem9MemoryProvider(MemoryProvider):
                 self._record_success()
                 logger.info("mem9 sync_turn: %d messages ingested", len(messages))
             except Exception as e:
+                if isinstance(e, _Mem9RuntimeQuotaError):
+                    logger.warning("mem9 sync quota denied: %s", e)
+                    return
                 self._record_failure()
                 logger.warning("mem9 sync failed: %s", e)
 
@@ -863,6 +1044,9 @@ class Mem9MemoryProvider(MemoryProvider):
                 logger.info("mem9 session-end ingest: %d messages submitted",
                             len(selected))
             except Exception as e:
+                if isinstance(e, _Mem9RuntimeQuotaError):
+                    logger.warning("mem9 session-end ingest quota denied: %s", e)
+                    return
                 self._record_failure()
                 logger.warning("mem9 session-end ingest failed: %s", e)
 
@@ -915,6 +1099,9 @@ class Mem9MemoryProvider(MemoryProvider):
             logger.info("mem9 pre-compress ingest: %d messages submitted",
                         len(selected))
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                logger.warning("mem9 pre-compress ingest quota denied: %s", e)
+                return ""
             self._record_failure()
             logger.warning("mem9 pre-compress ingest failed: %s", e)
 
@@ -946,6 +1133,9 @@ class Mem9MemoryProvider(MemoryProvider):
                 )
                 self._record_success()
             except Exception as e:
+                if isinstance(e, _Mem9RuntimeQuotaError):
+                    logger.warning("mem9 on_memory_write quota denied: %s", e)
+                    return
                 self._record_failure()
                 logger.debug("mem9 on_memory_write failed: %s", e)
 
@@ -995,6 +1185,8 @@ class Mem9MemoryProvider(MemoryProvider):
             self._record_success()
             return json.dumps({"stored": True, "id": result.get("id", "")})
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                return json.dumps(_quota_error_payload(e, "store memory"))
             self._record_failure()
             return tool_error(f"Failed to store: {e}")
 
@@ -1027,6 +1219,8 @@ class Mem9MemoryProvider(MemoryProvider):
                 return json.dumps({"result": "No relevant memories found."})
             return json.dumps({"results": items, "count": len(items)})
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                return json.dumps(_quota_error_payload(e, "search memories"))
             self._record_failure()
             return tool_error(f"Search failed: {e}")
 
@@ -1041,6 +1235,8 @@ class Mem9MemoryProvider(MemoryProvider):
                 return json.dumps({"error": "Memory not found."})
             return json.dumps(memory)
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                return json.dumps(_quota_error_payload(e, "recall memory"))
             self._record_failure()
             return tool_error(f"Get failed: {e}")
 
@@ -1059,6 +1255,8 @@ class Mem9MemoryProvider(MemoryProvider):
                 return json.dumps({"error": "Memory not found."})
             return json.dumps({"updated": True, "id": memory_id})
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                return json.dumps(_quota_error_payload(e, "write memory"))
             self._record_failure()
             return tool_error(f"Update failed: {e}")
 
@@ -1073,6 +1271,8 @@ class Mem9MemoryProvider(MemoryProvider):
                 return json.dumps({"error": "Memory not found."})
             return json.dumps({"deleted": True, "id": memory_id})
         except Exception as e:
+            if isinstance(e, _Mem9RuntimeQuotaError):
+                return json.dumps(_quota_error_payload(e, "write memory"))
             self._record_failure()
             return tool_error(f"Delete failed: {e}")
 
