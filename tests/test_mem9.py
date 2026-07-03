@@ -333,9 +333,50 @@ class TestToolDispatch:
         assert result["action_url"] == billing_url
         assert result["quota"]["retryAfterSeconds"] == 1
         assert "Mem9 memory saving is temporarily unavailable" in result["user_message"]
-        assert "upgrade their mem9 plan or set up billing" in result["user_message"]
+        assert "upgrade their mem9 plan and get more included usage" in result["user_message"]
         assert "wait 1 second before trying again" not in result["user_message"]
         assert result["user_message"].count(billing_url) == 1
+
+    def test_search_post_quota_rate_limited_keeps_claim_action(self, provider):
+        claim_url = "https://console.mem9.ai/console/claim?key=mem9_test"
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            429,
+            {
+                "code": "post_quota_rate_limited",
+                "message": "Post-quota rate limit exceeded.",
+                "details": {
+                    "mem9Code": "runtime_quota_denied",
+                    "retryable": True,
+                    "meter": "memory_recall_requests",
+                    "recommendedAction": {
+                        "bindingState": "unclaimed",
+                        "type": "claimApiKey",
+                        "url": claim_url,
+                    },
+                    "quotaGateResult": {
+                        "outcome": "rateLimited",
+                        "mode": "postQuota",
+                        "reason": "postQuotaRateLimitExceeded",
+                        "postQuotaRateLimit": {
+                            "requestsPerMinute": 4,
+                            "windowDurationSeconds": 60,
+                            "scope": "apiKeyMeter",
+                            "retryAfterSeconds": 23,
+                        },
+                    },
+                },
+            },
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert result["action_url"] == claim_url
+        assert result["quota"]["recommendedAction"]["type"] == "claimApiKey"
+        assert "temporary request limit" in result["user_message"]
+        assert "sign in or create a mem9 account and claim this API key" in result["user_message"]
+        assert "After claiming the key, they can upgrade their plan or set up billing" in result["user_message"]
+        assert "console/billing/plan" not in result["user_message"]
+        assert result["user_message"].count(claim_url) == 1
 
     def test_search_empty(self, provider):
         provider._client.search.return_value = {"memories": [], "total": 0}

@@ -236,11 +236,10 @@ def _action_instruction(error: _Mem9RuntimeQuotaError) -> str:
     action = error.recommended_action or {}
     action_type = str(action.get("type") or "").strip()
     action_url = str(action.get("url") or "").strip()
-    if _is_post_quota_rate_limited(error):
-        billing_url = action_url or _DEFAULT_BILLING_ACTION_URL
+    if _is_post_quota_rate_limited(error) and not action_url:
         return (
             "Ask them to open this link to upgrade their mem9 plan or set up "
-            f"billing for higher usage limits: {billing_url}. "
+            f"billing for higher usage limits: {_DEFAULT_BILLING_ACTION_URL}. "
             "Include the link exactly as written."
         )
     if not action_url:
