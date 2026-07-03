@@ -187,10 +187,7 @@ def _is_post_quota_rate_limited(error: _Mem9RuntimeQuotaError) -> bool:
 
 def _quota_reason(error: _Mem9RuntimeQuotaError) -> str:
     if _is_post_quota_rate_limited(error):
-        return (
-            "this API key is in post-quota mode and its temporary rate limit "
-            "for this memory meter has been reached"
-        )
+        return "this API key has reached the temporary request limit for this memory feature"
     action_type = str((error.recommended_action or {}).get("type") or "").strip()
     if action_type == "claimApiKey":
         return "the included usage quota for this API key has been used up"
@@ -250,7 +247,7 @@ def _action_instruction(error: _Mem9RuntimeQuotaError) -> str:
         if not action_url:
             return retry
         return (
-            f"{retry} If they need more continuous mem9 usage, ask them to open "
+            f"{retry} If they need higher mem9 usage limits, ask them to open "
             f"this link to adjust billing or upgrade their plan: {action_url}. "
             "Include the link exactly as written."
         )

@@ -291,8 +291,7 @@ class TestToolDispatch:
         assert result["code"] == "post_quota_rate_limited"
         assert result["status_code"] == 429
         assert result["quota"]["retryAfterSeconds"] == 23
-        assert "post-quota mode" in result["user_message"]
-        assert "temporary rate limit" in result["user_message"]
+        assert "temporary request limit" in result["user_message"]
         assert "wait 23 seconds before trying again" in result["user_message"]
         assert "open the mem9 console" not in result["user_message"]
 
@@ -333,7 +332,7 @@ class TestToolDispatch:
         assert result["quota"]["retryAfterSeconds"] == 1
         assert "Mem9 memory saving is temporarily unavailable" in result["user_message"]
         assert "wait 1 second before trying again" in result["user_message"]
-        assert "more continuous mem9 usage" in result["user_message"]
+        assert "higher mem9 usage limits" in result["user_message"]
         assert result["user_message"].count(billing_url) == 1
 
     def test_search_empty(self, provider):
