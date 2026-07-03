@@ -44,6 +44,7 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
+_DEFAULT_BILLING_ACTION_URL = "https://console.mem9.ai/console/billing/plan"
 
 # Recall injection — match openclaw plugin constants.
 _MAX_INJECT = 10
@@ -231,24 +232,15 @@ def _quota_notice_subject(error: _Mem9RuntimeQuotaError, operation: str) -> dict
     }
 
 
-def _retry_instruction(error: _Mem9RuntimeQuotaError) -> str:
-    if error.retry_after_seconds is not None:
-        unit = "second" if error.retry_after_seconds == 1 else "seconds"
-        return f"Ask them to wait {error.retry_after_seconds} {unit} before trying again."
-    return "Ask them to wait briefly before trying again."
-
-
 def _action_instruction(error: _Mem9RuntimeQuotaError) -> str:
     action = error.recommended_action or {}
     action_type = str(action.get("type") or "").strip()
     action_url = str(action.get("url") or "").strip()
     if _is_post_quota_rate_limited(error):
-        retry = _retry_instruction(error)
-        if not action_url:
-            return retry
+        billing_url = action_url or _DEFAULT_BILLING_ACTION_URL
         return (
-            f"{retry} If they need higher mem9 usage limits, ask them to open "
-            f"this link to adjust billing or upgrade their plan: {action_url}. "
+            "Ask them to open this link to upgrade their mem9 plan or set up "
+            f"billing for higher usage limits: {billing_url}. "
             "Include the link exactly as written."
         )
     if not action_url:
@@ -312,6 +304,8 @@ def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
         payload["quota"]["recommendedAction"] = error.recommended_action
         if error.recommended_action.get("url"):
             payload["action_url"] = error.recommended_action["url"]
+    elif _is_post_quota_rate_limited(error):
+        payload["action_url"] = _DEFAULT_BILLING_ACTION_URL
     return payload
 
 
