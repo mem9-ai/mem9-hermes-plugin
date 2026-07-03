@@ -66,7 +66,9 @@ _INJECTED_BLOCK_RE = re.compile(
 )
 _QUOTA_CODES = {
     "quota_exhausted",
+    "post_quota_rate_limited",
     "spending_limit_exceeded",
+    "runtime_access_blocked",
     "runtime_quota_denied",
 }
 
@@ -85,7 +87,13 @@ def _normalize_timeout_seconds(value: Any, default: float) -> float:
 class _Mem9RuntimeQuotaError(Exception):
     """mem9 runtime quota denial with plugin-facing action details."""
 
-    def __init__(self, status_code: int, payload: dict, body: str = ""):
+    def __init__(
+        self,
+        status_code: int,
+        payload: dict,
+        body: str = "",
+        retry_after: Optional[str] = None,
+    ):
         self.status_code = status_code
         self.payload = payload
         self.body = body
@@ -95,7 +103,25 @@ class _Mem9RuntimeQuotaError(Exception):
         self.details = details if isinstance(details, dict) else {}
         self.meter = str(self.details.get("meter") or "").strip()
         self.recommended_action = _normalize_recommended_action(self.details)
+        self.quota_gate_reason = _quota_gate_reason(self.details)
+        self.retry_after_seconds = _retry_after_seconds(self.details, retry_after)
         super().__init__(self.message)
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _retry_after_header(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        retry_after = int(value.strip())
+    except ValueError:
+        return None
+    return retry_after if retry_after > 0 else None
 
 
 def _normalize_recommended_action(details: dict) -> Optional[dict]:
@@ -116,6 +142,30 @@ def _normalize_recommended_action(details: dict) -> Optional[dict]:
     return result
 
 
+def _quota_gate_reason(details: dict) -> str:
+    quota_gate_result = details.get("quotaGateResult")
+    if not isinstance(quota_gate_result, dict):
+        return ""
+    return str(quota_gate_result.get("reason") or "").strip()
+
+
+def _retry_after_seconds(details: dict, retry_after: Optional[str] = None) -> Optional[int]:
+    direct = _positive_int(details.get("retryAfterSeconds"))
+    if direct is not None:
+        return direct
+
+    quota_gate_result = details.get("quotaGateResult")
+    if not isinstance(quota_gate_result, dict):
+        return _retry_after_header(retry_after)
+    post_quota_rate_limit = quota_gate_result.get("postQuotaRateLimit")
+    if not isinstance(post_quota_rate_limit, dict):
+        return _retry_after_header(retry_after)
+    nested = _positive_int(post_quota_rate_limit.get("retryAfterSeconds"))
+    if nested is not None:
+        return nested
+    return _retry_after_header(retry_after)
+
+
 def _is_runtime_quota_payload(payload: dict) -> bool:
     details = payload.get("details")
     if not isinstance(details, dict):
@@ -127,7 +177,20 @@ def _is_runtime_quota_payload(payload: dict) -> bool:
     return mem9_code == "runtime_quota_denied" or code in _QUOTA_CODES
 
 
+def _is_post_quota_rate_limited(error: _Mem9RuntimeQuotaError) -> bool:
+    return (
+        error.status_code == 429
+        or error.code == "post_quota_rate_limited"
+        or error.quota_gate_reason == "postQuotaRateLimitExceeded"
+    )
+
+
 def _quota_reason(error: _Mem9RuntimeQuotaError) -> str:
+    if _is_post_quota_rate_limited(error):
+        return (
+            "this API key is in post-quota mode and its temporary rate limit "
+            "for this memory meter has been reached"
+        )
     action_type = str((error.recommended_action or {}).get("type") or "").strip()
     if action_type == "claimApiKey":
         return "the included usage quota for this API key has been used up"
@@ -137,6 +200,8 @@ def _quota_reason(error: _Mem9RuntimeQuotaError) -> str:
         return "the included usage quota has been used up and on-demand usage is not enabled"
     if action_type == "upgradePlan" or error.code == "quota_exhausted":
         return "the included usage quota for this mem9 account has been used up"
+    if error.code == "runtime_access_blocked":
+        return "the current account or billing state blocks runtime memory access"
     return "the runtime quota check blocked this request"
 
 
@@ -169,10 +234,26 @@ def _quota_notice_subject(error: _Mem9RuntimeQuotaError, operation: str) -> dict
     }
 
 
-def _action_instruction(action: Optional[dict]) -> str:
-    action = action or {}
+def _retry_instruction(error: _Mem9RuntimeQuotaError) -> str:
+    if error.retry_after_seconds is not None:
+        unit = "second" if error.retry_after_seconds == 1 else "seconds"
+        return f"Ask them to wait {error.retry_after_seconds} {unit} before trying again."
+    return "Ask them to wait briefly before trying again."
+
+
+def _action_instruction(error: _Mem9RuntimeQuotaError) -> str:
+    action = error.recommended_action or {}
     action_type = str(action.get("type") or "").strip()
     action_url = str(action.get("url") or "").strip()
+    if _is_post_quota_rate_limited(error):
+        retry = _retry_instruction(error)
+        if not action_url:
+            return retry
+        return (
+            f"{retry} If they need more continuous mem9 usage, ask them to open "
+            f"this link to adjust billing or upgrade their plan: {action_url}. "
+            "Include the link exactly as written."
+        )
     if not action_url:
         return "Ask them to open the mem9 console to resolve the account or billing state."
 
@@ -209,7 +290,7 @@ def _format_runtime_quota_notice(error: _Mem9RuntimeQuotaError, operation: str) 
     return (
         f"{subject['headline']} because {_quota_reason(error)}. "
         f"In your reply, briefly tell the user that {subject['userState']}. "
-        f"{_action_instruction(error.recommended_action)}"
+        f"{_action_instruction(error)}"
     )
 
 
@@ -228,6 +309,8 @@ def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
     }
     if error.meter:
         payload["quota"]["meter"] = error.meter
+    if error.retry_after_seconds is not None:
+        payload["quota"]["retryAfterSeconds"] = error.retry_after_seconds
     if error.recommended_action:
         payload["quota"]["recommendedAction"] = error.recommended_action
         if error.recommended_action.get("url"):
@@ -387,7 +470,13 @@ class _Mem9Client:
         body = getattr(resp, "text", "") or ""
         payload = _Mem9Client._safe_json(resp)
         if isinstance(payload, dict) and _is_runtime_quota_payload(payload):
-            raise _Mem9RuntimeQuotaError(status_code, payload, body)
+            headers = getattr(resp, "headers", {}) or {}
+            raise _Mem9RuntimeQuotaError(
+                status_code,
+                payload,
+                body,
+                str(headers.get("Retry-After") or ""),
+            )
 
         resp.raise_for_status()
 
