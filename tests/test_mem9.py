@@ -67,12 +67,23 @@ SPEC.loader.exec_module(mem9)
 
 Mem9MemoryProvider = mem9.Mem9MemoryProvider
 _Mem9Client = mem9._Mem9Client
+_Mem9RuntimeQuotaError = mem9._Mem9RuntimeQuotaError
 _load_config = mem9._load_config
 _format_memories_block = mem9._format_memories_block
 _strip_injected_context = mem9._strip_injected_context
 _select_messages = mem9._select_messages
 _extract_user_assistant = mem9._extract_user_assistant
 register = mem9.register
+
+CLAIM_URL = "https://console.mem9.ai/console/claim?key=mem9_test"
+BILLING_URL = "https://console.mem9.ai/console/billing/plan"
+
+
+def quota_payload(error: str, runtime_quota=None) -> dict:
+    details = {"errorCategory": "runtime_quota_denied"}
+    if runtime_quota is not None:
+        details["runtimeQuota"] = runtime_quota
+    return {"error": error, "details": details}
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +243,145 @@ class TestToolDispatch:
         assert result["results"][0]["content"] == "dark mode"
         assert result["results"][0]["age"] == "2h ago"
 
+    def test_search_runtime_quota_denied(self, provider):
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            402,
+            quota_payload("Spending limit is exhausted.", {
+                "meter": "memory_recall_requests",
+                "recommendedAction": {
+                    "type": "openUrl",
+                    "providerActionCode": "increaseSpendingLimit",
+                    "url": BILLING_URL,
+                },
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert result["code"] == "runtime_quota_denied"
+        assert result["status_code"] == 402
+        assert result["action_url"] == BILLING_URL
+        assert result["quota"]["meter"] == "memory_recall_requests"
+        assert "Mem9 recall is temporarily unavailable" in result["quota"]["user_message"]
+        assert "increase the mem9 spending limit" in result["quota"]["user_message"]
+        assert result["quota"]["recommendedAction"]["providerActionCode"] == "increaseSpendingLimit"
+
+    def test_search_post_quota_rate_limited(self, provider):
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            429,
+            quota_payload("Post-quota rate limit exceeded.", {
+                "meter": "memory_recall_requests",
+                "quotaGateResult": {
+                    "outcome": "rateLimited",
+                    "mode": "postQuota",
+                    "postQuotaRateLimit": {
+                        "requestsPerMinute": 4,
+                        "windowDurationSeconds": 60,
+                        "scope": "apiKeyMeter",
+                        "retryAfterSeconds": 23,
+                    },
+                },
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert result["code"] == "runtime_quota_denied"
+        assert result["status_code"] == 429
+        assert "action_url" not in result
+        assert result["quota"]["retryAfterSeconds"] == 23
+        assert "temporary request limit" in result["user_message"]
+        assert "quota/rate-limit check blocked this request" in result["user_message"]
+        assert "console/billing/plan" not in result["user_message"]
+
+    def test_store_post_quota_rate_limited_keeps_billing_action(self, provider):
+        billing_url = "https://console.mem9.ai/console/billing/plan"
+        provider._client.store.side_effect = _Mem9RuntimeQuotaError(
+            429,
+            quota_payload("Post-quota rate limit exceeded.", {
+                "meter": "memory_write_requests",
+                "recommendedAction": {
+                    "type": "openUrl",
+                    "providerActionCode": "upgradePlan",
+                    "url": billing_url,
+                },
+                "quotaGateResult": {
+                    "outcome": "rateLimited",
+                    "mode": "postQuota",
+                    "reason": "postQuotaRateLimitExceeded",
+                    "postQuotaRateLimit": {
+                        "requestsPerMinute": 2,
+                        "windowDurationSeconds": 60,
+                        "scope": "apiKeyMeter",
+                        "retryAfterSeconds": 1,
+                    },
+                },
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_store", {"content": "User prefers dark mode"},
+        ))
+        assert result["action_url"] == billing_url
+        assert result["quota"]["retryAfterSeconds"] == 1
+        assert "Mem9 memory saving is temporarily unavailable" in result["user_message"]
+        assert "upgrade their mem9 plan and get more included usage" in result["user_message"]
+        assert "wait 1 second before trying again" not in result["user_message"]
+        assert result["user_message"].count(billing_url) == 1
+
+    def test_search_post_quota_rate_limited_keeps_claim_action(self, provider):
+        claim_url = "https://console.mem9.ai/console/claim?key=mem9_test"
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            429,
+            quota_payload("Post-quota rate limit exceeded.", {
+                "meter": "memory_recall_requests",
+                "recommendedAction": {
+                    "type": "openUrl",
+                    "providerActionCode": "claimApiKey",
+                    "url": claim_url,
+                },
+                "quotaGateResult": {
+                    "outcome": "rateLimited",
+                    "mode": "postQuota",
+                    "reason": "postQuotaRateLimitExceeded",
+                    "postQuotaRateLimit": {
+                        "requestsPerMinute": 4,
+                        "windowDurationSeconds": 60,
+                        "scope": "apiKeyMeter",
+                        "retryAfterSeconds": 23,
+                    },
+                },
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert result["action_url"] == claim_url
+        assert result["quota"]["recommendedAction"]["providerActionCode"] == "claimApiKey"
+        assert "temporary request limit" in result["user_message"]
+        assert "sign in or create a mem9 account and claim this API key" in result["user_message"]
+        assert "After claiming the key, they can upgrade their plan or set up billing" in result["user_message"]
+        assert "console/billing/plan" not in result["user_message"]
+        assert result["user_message"].count(claim_url) == 1
+
+    def test_public_quota_payload_rejects_legacy_action_fallbacks(self, provider):
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            402,
+            quota_payload("Included quota is exhausted.", {
+                "meter": "memory_recall_requests",
+                "recommendedAction": {
+                    "type": "claimApiKey",
+                },
+                "upgradeUrl": CLAIM_URL,
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert "action_url" not in result
+        assert "recommendedAction" not in result["quota"]
+        assert "sign in or create a mem9 account and claim this API key" not in result["user_message"]
+        assert CLAIM_URL not in result["user_message"]
+
     def test_search_empty(self, provider):
         provider._client.search.return_value = {"memories": [], "total": 0}
         result = json.loads(provider.handle_tool_call(
@@ -382,6 +532,28 @@ class TestPrefetch:
         mock_client.search.side_effect = RuntimeError("network")
         p._client = mock_client
         assert p.prefetch("hello") == ""
+
+    def test_prefetch_returns_runtime_quota_denial_notice(self):
+        p = Mem9MemoryProvider()
+        p._config = {"api_key": "k", "api_url": "http://localhost"}
+        mock_client = MagicMock()
+        mock_client.search.side_effect = _Mem9RuntimeQuotaError(
+            402,
+            quota_payload("Included quota is exhausted.", {
+                "meter": "memory_recall_requests",
+                "recommendedAction": {
+                    "type": "openUrl",
+                    "providerActionCode": "claimApiKey",
+                    "url": CLAIM_URL,
+                },
+            }),
+        )
+        p._client = mock_client
+        result = p.prefetch("hello")
+        assert "Mem9 recall is temporarily unavailable" in result
+        assert "mem9 cannot recall memories right now" in result
+        assert "console/claim?key=mem9_test" in result
+        assert p._consecutive_failures == 0
 
     def test_prefetch_truncates_long_query(self):
         p = Mem9MemoryProvider()
@@ -712,6 +884,56 @@ class TestSafeJson:
         mock_resp.status_code = 200
         mock_resp.json.side_effect = ValueError("bad json")
         assert _Mem9Client._safe_json(mock_resp) == {}
+
+    def test_runtime_quota_denial_raises_typed_error(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 402
+        mock_resp.headers = {}
+        mock_resp.text = json.dumps(quota_payload("Included quota is exhausted.", {
+            "meter": "memory_recall_requests",
+            "recommendedAction": {
+                "type": "openUrl",
+                "providerActionCode": "claimApiKey",
+                "url": CLAIM_URL,
+            },
+        }))
+        mock_resp.json.return_value = json.loads(mock_resp.text)
+
+        with pytest.raises(_Mem9RuntimeQuotaError) as exc:
+            _Mem9Client._raise_for_status(mock_resp)
+
+        assert exc.value.code == "runtime_quota_denied"
+        assert exc.value.meter == "memory_recall_requests"
+        assert exc.value.recommended_action["providerActionCode"] == "claimApiKey"
+        assert exc.value.recommended_action["url"] == CLAIM_URL
+
+    def test_post_quota_rate_limit_raises_typed_error(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"Retry-After": "23"}
+        mock_resp.text = json.dumps(quota_payload("Post-quota rate limit exceeded.", {
+            "meter": "memory_recall_requests",
+            "quotaGateResult": {
+                "outcome": "rateLimited",
+                "mode": "postQuota",
+                "reason": "postQuotaRateLimitExceeded",
+                "postQuotaRateLimit": {
+                    "requestsPerMinute": 4,
+                    "windowDurationSeconds": 60,
+                    "scope": "apiKeyMeter",
+                },
+            },
+        }))
+        mock_resp.json.return_value = json.loads(mock_resp.text)
+
+        with pytest.raises(_Mem9RuntimeQuotaError) as exc:
+            _Mem9Client._raise_for_status(mock_resp)
+
+        assert exc.value.code == "runtime_quota_denied"
+        assert exc.value.status_code == 429
+        assert exc.value.meter == "memory_recall_requests"
+        assert exc.value.quota_gate_reason == "postQuotaRateLimitExceeded"
+        assert exc.value.retry_after_seconds == 23
 
 
 # ---------------------------------------------------------------------------
