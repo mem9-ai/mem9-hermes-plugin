@@ -44,7 +44,6 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
-_DEFAULT_BILLING_ACTION_URL = "https://console.mem9.ai/console/billing/plan"
 
 # Recall injection — match openclaw plugin constants.
 _MAX_INJECT = 10
@@ -98,10 +97,17 @@ class _Mem9RuntimeQuotaError(Exception):
         self.status_code = status_code
         self.payload = payload
         self.body = body
-        self.code = str(payload.get("code") or "runtime_quota_denied")
-        self.message = str(payload.get("message") or "runtime usage quota denied")
         details = payload.get("details")
-        self.details = details if isinstance(details, dict) else {}
+        public_details = details if isinstance(details, dict) else {}
+        if public_details.get("errorCategory") == "runtime_quota_denied":
+            runtime_quota = public_details.get("runtimeQuota")
+            self.details = runtime_quota if isinstance(runtime_quota, dict) else {}
+            self.code = "runtime_quota_denied"
+            self.message = str(payload.get("error") or "Runtime usage quota denied.")
+        else:
+            self.details = public_details
+            self.code = "runtime_quota_denied"
+            self.message = str(payload.get("message") or payload.get("error") or "Runtime usage quota denied.")
         self.meter = str(self.details.get("meter") or "").strip()
         self.recommended_action = _normalize_recommended_action(self.details)
         self.quota_gate_reason = _quota_gate_reason(self.details)
@@ -128,16 +134,30 @@ def _retry_after_header(value: Optional[str]) -> Optional[int]:
 def _normalize_recommended_action(details: dict) -> Optional[dict]:
     nested = details.get("recommendedAction")
     action = nested if isinstance(nested, dict) else {}
-    binding_state = str(action.get("bindingState") or details.get("bindingState") or "").strip()
-    action_type = str(action.get("type") or details.get("upgradeAction") or "").strip()
-    url = str(action.get("url") or details.get("upgradeUrl") or "").strip()
-    if not binding_state and not action_type and not url:
+    action_type = str(action.get("type") or "").strip()
+    provider_action_code = str(action.get("providerActionCode") or "").strip()
+    severity = str(action.get("severity") or "").strip()
+    url = str(action.get("url") or "").strip()
+
+    legacy_action = str(details.get("upgradeAction") or "").strip()
+    if not provider_action_code and action_type and action_type != "openUrl":
+        provider_action_code = action_type
+        action_type = "openUrl" if url else ""
+    if not provider_action_code and legacy_action:
+        provider_action_code = legacy_action
+        action_type = "openUrl" if url else ""
+    if not url:
+        url = str(details.get("upgradeUrl") or "").strip()
+
+    if not action_type and not provider_action_code and not severity and not url:
         return None
     result: dict = {}
-    if binding_state:
-        result["bindingState"] = binding_state
     if action_type:
         result["type"] = action_type
+    if provider_action_code:
+        result["providerActionCode"] = provider_action_code
+    if severity:
+        result["severity"] = severity
     if url:
         result["url"] = url
     return result
@@ -171,6 +191,8 @@ def _is_runtime_quota_payload(payload: dict) -> bool:
     details = payload.get("details")
     if not isinstance(details, dict):
         details = {}
+    if str(details.get("errorCategory") or "").strip() == "runtime_quota_denied":
+        return True
     mem9_code = str(
         details.get("mem9Code") or details.get("mem9_code") or payload.get("mem9_code") or ""
     ).strip()
@@ -189,16 +211,16 @@ def _is_post_quota_rate_limited(error: _Mem9RuntimeQuotaError) -> bool:
 def _quota_reason(error: _Mem9RuntimeQuotaError) -> str:
     if _is_post_quota_rate_limited(error):
         return "this API key has reached the temporary request limit for this memory feature"
-    action_type = str((error.recommended_action or {}).get("type") or "").strip()
-    if action_type == "claimApiKey":
+    provider_action_code = str((error.recommended_action or {}).get("providerActionCode") or "").strip()
+    if provider_action_code == "claimApiKey":
         return "the included usage quota for this API key has been used up"
-    if action_type == "increaseSpendingLimit" or error.code == "spending_limit_exceeded":
+    if provider_action_code == "increaseSpendingLimit":
         return "the configured spending limit would be exceeded"
-    if action_type == "enableOnDemand":
+    if provider_action_code == "enableOnDemand":
         return "the included usage quota has been used up and on-demand usage is not enabled"
-    if action_type == "upgradePlan" or error.code == "quota_exhausted":
+    if provider_action_code == "upgradePlan":
         return "the included usage quota for this mem9 account has been used up"
-    if error.code == "runtime_access_blocked":
+    if provider_action_code == "resolveAccountState":
         return "the current account or billing state blocks runtime memory access"
     return "the runtime quota check blocked this request"
 
@@ -234,35 +256,34 @@ def _quota_notice_subject(error: _Mem9RuntimeQuotaError, operation: str) -> dict
 
 def _action_instruction(error: _Mem9RuntimeQuotaError) -> str:
     action = error.recommended_action or {}
-    action_type = str(action.get("type") or "").strip()
+    provider_action_code = str(action.get("providerActionCode") or "").strip()
     action_url = str(action.get("url") or "").strip()
     if _is_post_quota_rate_limited(error) and not action_url:
         return (
-            "Ask them to open this link to upgrade their mem9 plan or set up "
-            f"billing for higher usage limits: {_DEFAULT_BILLING_ACTION_URL}. "
-            "Include the link exactly as written."
+            "Tell them that the quota/rate-limit check blocked this request "
+            "and to retry later or open the mem9 console to review account and billing settings."
         )
     if not action_url:
         return "Ask them to open the mem9 console to resolve the account or billing state."
 
-    if action_type == "claimApiKey":
+    if provider_action_code == "claimApiKey":
         return (
             "Ask them to open this link to sign in or create a mem9 account and "
             f"claim this API key: {action_url}. After claiming the key, they can "
             "upgrade their plan or set up billing to get more usage. Include the "
             "link exactly as written."
         )
-    if action_type == "upgradePlan":
+    if provider_action_code == "upgradePlan":
         return (
             "Ask them to open this link to upgrade their mem9 plan and get more "
             f"included usage: {action_url}. Include the link exactly as written."
         )
-    if action_type == "increaseSpendingLimit":
+    if provider_action_code == "increaseSpendingLimit":
         return (
             "Ask them to open this link to increase the mem9 spending limit or "
             f"adjust billing settings: {action_url}. Include the link exactly as written."
         )
-    if action_type == "enableOnDemand":
+    if provider_action_code == "enableOnDemand":
         return (
             "Ask them to open this link to enable billing or on-demand usage for "
             f"mem9: {action_url}. Include the link exactly as written."
@@ -303,8 +324,6 @@ def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
         payload["quota"]["recommendedAction"] = error.recommended_action
         if error.recommended_action.get("url"):
             payload["action_url"] = error.recommended_action["url"]
-    elif _is_post_quota_rate_limited(error):
-        payload["action_url"] = _DEFAULT_BILLING_ACTION_URL
     return payload
 
 
