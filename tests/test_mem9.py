@@ -363,6 +363,25 @@ class TestToolDispatch:
         assert "console/billing/plan" not in result["user_message"]
         assert result["user_message"].count(claim_url) == 1
 
+    def test_public_quota_payload_rejects_legacy_action_fallbacks(self, provider):
+        provider._client.search.side_effect = _Mem9RuntimeQuotaError(
+            402,
+            quota_payload("Included quota is exhausted.", {
+                "meter": "memory_recall_requests",
+                "recommendedAction": {
+                    "type": "claimApiKey",
+                },
+                "upgradeUrl": CLAIM_URL,
+            }),
+        )
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert "action_url" not in result
+        assert "recommendedAction" not in result["quota"]
+        assert "sign in or create a mem9 account and claim this API key" not in result["user_message"]
+        assert CLAIM_URL not in result["user_message"]
+
     def test_search_empty(self, provider):
         provider._client.search.return_value = {"memories": [], "total": 0}
         result = json.loads(provider.handle_tool_call(

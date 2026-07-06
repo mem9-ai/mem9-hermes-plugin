@@ -99,7 +99,8 @@ class _Mem9RuntimeQuotaError(Exception):
         self.body = body
         details = payload.get("details")
         public_details = details if isinstance(details, dict) else {}
-        if public_details.get("errorCategory") == "runtime_quota_denied":
+        is_public_quota_envelope = public_details.get("errorCategory") == "runtime_quota_denied"
+        if is_public_quota_envelope:
             runtime_quota = public_details.get("runtimeQuota")
             self.details = runtime_quota if isinstance(runtime_quota, dict) else {}
             self.code = "runtime_quota_denied"
@@ -109,7 +110,10 @@ class _Mem9RuntimeQuotaError(Exception):
             self.code = "runtime_quota_denied"
             self.message = str(payload.get("message") or payload.get("error") or "Runtime usage quota denied.")
         self.meter = str(self.details.get("meter") or "").strip()
-        self.recommended_action = _normalize_recommended_action(self.details)
+        self.recommended_action = _normalize_recommended_action(
+            self.details,
+            strict_public=is_public_quota_envelope,
+        )
         self.quota_gate_reason = _quota_gate_reason(self.details)
         self.retry_after_seconds = _retry_after_seconds(self.details, retry_after)
         super().__init__(self.message)
@@ -131,7 +135,7 @@ def _retry_after_header(value: Optional[str]) -> Optional[int]:
     return retry_after if retry_after > 0 else None
 
 
-def _normalize_recommended_action(details: dict) -> Optional[dict]:
+def _normalize_recommended_action(details: dict, *, strict_public: bool = False) -> Optional[dict]:
     nested = details.get("recommendedAction")
     action = nested if isinstance(nested, dict) else {}
     action_type = str(action.get("type") or "").strip()
@@ -139,15 +143,19 @@ def _normalize_recommended_action(details: dict) -> Optional[dict]:
     severity = str(action.get("severity") or "").strip()
     url = str(action.get("url") or "").strip()
 
-    legacy_action = str(details.get("upgradeAction") or "").strip()
-    if not provider_action_code and action_type and action_type != "openUrl":
-        provider_action_code = action_type
-        action_type = "openUrl" if url else ""
-    if not provider_action_code and legacy_action:
-        provider_action_code = legacy_action
-        action_type = "openUrl" if url else ""
-    if not url:
-        url = str(details.get("upgradeUrl") or "").strip()
+    if strict_public:
+        if action_type != "openUrl":
+            return None
+    else:
+        legacy_action = str(details.get("upgradeAction") or "").strip()
+        if not provider_action_code and action_type and action_type != "openUrl":
+            provider_action_code = action_type
+            action_type = "openUrl" if url else ""
+        if not provider_action_code and legacy_action:
+            provider_action_code = legacy_action
+            action_type = "openUrl" if url else ""
+        if not url:
+            url = str(details.get("upgradeUrl") or "").strip()
 
     if not action_type and not provider_action_code and not severity and not url:
         return None
