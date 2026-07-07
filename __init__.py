@@ -414,6 +414,14 @@ def _format_runtime_state_notice(runtime_state: Any) -> str:
 
     action = _normalize_runtime_state_action(runtime_state.get("recommendedAction"))
     candidates: list[tuple[int, str, Optional[dict]]] = []
+    mem9_api_key = runtime_state.get("mem9ApiKey") if isinstance(runtime_state.get("mem9ApiKey"), dict) else {}
+    if _text(mem9_api_key.get("status")) == "inactive":
+        candidates.append((
+            65,
+            "Mem9 API key is inactive. In your reply, briefly tell the user to rerun mem9 setup or create a new mem9 API key before memory access can continue.",
+            action,
+        ))
+
     if action and (_text(action.get("severity")) or _text(action.get("url"))):
         priority = 50 if action.get("severity") == "blocking" else 20
         candidates.append((
@@ -1272,6 +1280,7 @@ class Mem9MemoryProvider(MemoryProvider):
                 return _format_runtime_quota_notice(e, "recall paused")
             self._record_failure()
             logger.warning("mem9 prefetch failed: %s", e)
+            return runtime_state_notice
         return ""
 
     def sync_turn(self, user_content: str, assistant_content: str,

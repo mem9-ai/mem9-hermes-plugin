@@ -534,6 +534,30 @@ class TestPrefetch:
         p._client = mock_client
         assert p.prefetch("hello") == ""
 
+    def test_prefetch_preserves_runtime_state_notice_on_search_error(self):
+        p = Mem9MemoryProvider()
+        p._config = {"api_key": "k", "api_url": "http://localhost"}
+        mock_client = MagicMock()
+        mock_client.runtime_state.return_value = {
+            "mem9ApiKey": {"status": "active"},
+            "meters": [{
+                "meter": "memory_recall_requests",
+                "budgets": [{
+                    "type": "includedQuota",
+                    "state": "warning",
+                    "usage": {"percent": 82, "remaining": 18},
+                    "capacity": {"type": "limited", "value": 100},
+                }],
+            }],
+        }
+        mock_client.search.side_effect = RuntimeError("network")
+        p._client = mock_client
+
+        result = p.prefetch("hello")
+
+        assert "mem9 recall is at 82% of its included quota" in result
+        assert p._consecutive_failures == 1
+
     def test_prefetch_returns_runtime_quota_denial_notice(self):
         p = Mem9MemoryProvider()
         p._config = {"api_key": "k", "api_url": "http://localhost"}
@@ -680,6 +704,21 @@ class TestFormatRuntimeStateNotice:
         assert "runtime account action" in notice
         assert "upgrade their mem9 plan" in notice
         assert notice.count(BILLING_URL) == 1
+
+    def test_inactive_api_key_notice(self):
+        notice = _format_runtime_state_notice({
+            "mem9ApiKey": {"status": "inactive"},
+            "meters": [{
+                "meter": "memory_recall_requests",
+                "budgets": [{
+                    "type": "includedQuota",
+                    "state": "unlimited",
+                }],
+            }],
+        })
+
+        assert "Mem9 API key is inactive" in notice
+        assert "rerun mem9 setup or create a new mem9 API key" in notice
 
 
 # ---------------------------------------------------------------------------
