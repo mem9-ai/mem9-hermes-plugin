@@ -44,6 +44,8 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
+_RUNTIME_WARNING_PERCENT = 80
+_RUNTIME_URGENT_PERCENT = 95
 
 # Recall injection — match openclaw plugin constants.
 _MAX_INJECT = 10
@@ -311,6 +313,189 @@ def _format_runtime_quota_notice(error: _Mem9RuntimeQuotaError, operation: str) 
     )
 
 
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _number(value: Any) -> Optional[float]:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _compact_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def _runtime_meter_label(meter: str) -> str:
+    if meter == "memory_recall_requests":
+        return "mem9 recall"
+    if meter == "memory_write_requests":
+        return "mem9 memory saving"
+    return "mem9 memory"
+
+
+def _runtime_budget_label(budget_type: str) -> str:
+    if budget_type == "includedQuota":
+        return "included quota"
+    if budget_type == "spendingLimit":
+        return "spending limit"
+    if budget_type == "credits":
+        return "credit balance"
+    return "runtime quota"
+
+
+def _runtime_mode_label(mode: str) -> str:
+    if mode == "onDemand":
+        return "on-demand usage"
+    if mode == "postQuota":
+        return "the post-quota request lane"
+    return "provider-managed runtime"
+
+
+def _format_runtime_state_action(action: Optional[dict]) -> str:
+    action = action or {}
+    provider_action_code = _text(action.get("providerActionCode"))
+    url = _text(action.get("url"))
+    if not url:
+        return (
+            " Ask them to open the mem9 console to resolve the account or billing state."
+            if provider_action_code else ""
+        )
+    if provider_action_code == "claimApiKey":
+        return (
+            " Ask them to open this link to sign in or create a mem9 account and "
+            f"claim this API key: {url}. Include the link exactly as written."
+        )
+    if provider_action_code == "upgradePlan":
+        return (
+            " Ask them to open this link to upgrade their mem9 plan and get more "
+            f"included usage: {url}. Include the link exactly as written."
+        )
+    if provider_action_code == "increaseSpendingLimit":
+        return (
+            " Ask them to open this link to increase the mem9 spending limit or "
+            f"adjust billing settings: {url}. Include the link exactly as written."
+        )
+    if provider_action_code == "enableOnDemand":
+        return (
+            " Ask them to open this link to enable billing or on-demand usage for "
+            f"mem9: {url}. Include the link exactly as written."
+        )
+    return (
+        " Ask them to open this mem9 link to resolve the account or billing state: "
+        f"{url}. Include the link exactly as written."
+    )
+
+
+def _normalize_runtime_state_action(value: Any) -> Optional[dict]:
+    action = value if isinstance(value, dict) else {}
+    normalized = {
+        "providerActionCode": _text(action.get("providerActionCode")),
+        "severity": _text(action.get("severity")),
+        "type": _text(action.get("type")),
+        "url": _text(action.get("url")),
+    }
+    return {k: v for k, v in normalized.items() if v} or None
+
+
+def _runtime_budget_numbers(budget: dict) -> dict:
+    usage = budget.get("usage") if isinstance(budget.get("usage"), dict) else {}
+    capacity = budget.get("capacity") if isinstance(budget.get("capacity"), dict) else {}
+    capacity_value = _number(capacity.get("value")) if _text(capacity.get("type")) == "limited" else None
+    return {
+        "percent": _number(usage.get("percent")),
+        "remaining": _number(usage.get("remaining")),
+        "capacity": capacity_value if capacity_value and capacity_value > 0 else None,
+    }
+
+
+def _format_runtime_state_notice(runtime_state: Any) -> str:
+    if not isinstance(runtime_state, dict):
+        return ""
+
+    action = _normalize_runtime_state_action(runtime_state.get("recommendedAction"))
+    candidates: list[tuple[int, str, Optional[dict]]] = []
+    if action and (_text(action.get("severity")) or _text(action.get("url"))):
+        priority = 50 if action.get("severity") == "blocking" else 20
+        candidates.append((
+            priority,
+            "Mem9 has a runtime account action available. In your reply, briefly tell the user that mem9 needs account or billing attention.",
+            action,
+        ))
+
+    meters = runtime_state.get("meters")
+    for raw_meter in meters if isinstance(meters, list) else []:
+        if not isinstance(raw_meter, dict):
+            continue
+        feature = _runtime_meter_label(_text(raw_meter.get("meter")))
+        gate = raw_meter.get("quotaGateResult") if isinstance(raw_meter.get("quotaGateResult"), dict) else {}
+        outcome = _text(gate.get("outcome"))
+        mode = _text(gate.get("mode"))
+        if outcome == "blocked":
+            candidates.append((
+                60,
+                f"{feature} is blocked by runtime quota. In your reply, briefly tell the user that {feature} needs attention before memory access can continue.",
+                action,
+            ))
+        elif outcome == "rateLimited":
+            candidates.append((
+                55,
+                f"{feature} has reached its temporary runtime rate limit. In your reply, briefly tell the user that {feature} needs a retry later.",
+                action,
+            ))
+        elif mode in ("onDemand", "postQuota"):
+            candidates.append((
+                40,
+                f"{feature} is in constrained mode and using {_runtime_mode_label(mode)}. In your reply, briefly tell the user that {feature} is running in constrained mode.",
+                action,
+            ))
+
+        budgets = raw_meter.get("budgets")
+        for raw_budget in budgets if isinstance(budgets, list) else []:
+            if not isinstance(raw_budget, dict):
+                continue
+            label = _runtime_budget_label(_text(raw_budget.get("type")))
+            state = _text(raw_budget.get("state"))
+            numbers = _runtime_budget_numbers(raw_budget)
+            absolute_urgent = (
+                numbers["capacity"] is not None
+                and numbers["remaining"] is not None
+                and numbers["remaining"] <= max(5, numbers["capacity"] * 0.02)
+            )
+            if state == "exhausted":
+                candidates.append((
+                    45,
+                    f"{feature} has exhausted its {label}. In your reply, briefly tell the user that {feature} is in constrained mode.",
+                    action,
+                ))
+            elif (numbers["percent"] is not None and numbers["percent"] >= _RUNTIME_URGENT_PERCENT) or absolute_urgent:
+                usage = (
+                    f"has {_compact_number(numbers['remaining'])} units remaining in its {label}"
+                    if numbers["remaining"] is not None
+                    else f"is at {_compact_number(numbers['percent'] or _RUNTIME_URGENT_PERCENT)}% of its {label}"
+                )
+                candidates.append((
+                    35,
+                    f"{feature} {usage}. In your reply, briefly tell the user that {feature} is almost out of runtime quota.",
+                    action,
+                ))
+            elif state == "warning" or (numbers["percent"] is not None and numbers["percent"] >= _RUNTIME_WARNING_PERCENT):
+                usage = (
+                    f"is at {_compact_number(numbers['percent'])}% of its {label}"
+                    if numbers["percent"] is not None
+                    else f"is nearing its {label}"
+                )
+                candidates.append((
+                    25,
+                    f"{feature} {usage}. In your reply, briefly tell the user that {feature} is nearing its runtime quota.",
+                    action,
+                ))
+
+    if not candidates:
+        return ""
+    _priority, message, selected_action = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
+    return f"{message}{_format_runtime_state_action(selected_action)}"
+
+
 def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
     user_message = _format_runtime_quota_notice(error, operation)
     payload = {
@@ -552,6 +737,11 @@ class _Mem9Client:
         self._raise_for_status(resp)
         return resp.json()
 
+    def runtime_state(self) -> dict:
+        resp = self._http.get(f"{self._base}/v1alpha2/mem9s/runtime-state")
+        self._raise_for_status(resp)
+        return self._safe_json(resp)
+
     def get(self, memory_id: str) -> Optional[dict]:
         """Get a single memory by ID."""
         resp = self._http.get(
@@ -760,6 +950,7 @@ class Mem9MemoryProvider(MemoryProvider):
         self._breaker_lock = threading.Lock()
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
+        self._runtime_state_checked = False
 
     @property
     def name(self) -> str:
@@ -1019,6 +1210,19 @@ class Mem9MemoryProvider(MemoryProvider):
 
     # -- system prompt / prefetch / sync -------------------------------------
 
+    def _runtime_state_notice_once(self, client: _Mem9Client) -> str:
+        if self._runtime_state_checked:
+            return ""
+        self._runtime_state_checked = True
+        try:
+            notice = _format_runtime_state_notice(client.runtime_state())
+            if notice:
+                logger.info("mem9 runtime-state notice prepared")
+            return notice
+        except Exception as e:
+            logger.debug("mem9 runtime-state check failed: %s", e)
+            return ""
+
     def system_prompt_block(self) -> str:
         if not self._config.get("api_key"):
             return ""
@@ -1049,6 +1253,7 @@ class Mem9MemoryProvider(MemoryProvider):
         client = self._get_client()
         if not client or self._is_breaker_open() or not query:
             return ""
+        runtime_state_notice = self._runtime_state_notice_once(client)
         try:
             resp = client.search(query[:200], limit=_MAX_INJECT)
             memories = resp.get("memories") or []
@@ -1057,9 +1262,10 @@ class Mem9MemoryProvider(MemoryProvider):
                 logger.info("mem9 prefetch: %d memories recalled (%d bytes)",
                             len(memories), len(block))
                 self._record_success()
-                return block
+                return f"{runtime_state_notice}\n\n{block}" if runtime_state_notice else block
             logger.info("mem9 prefetch: 0 memories (query=%r)", query[:80])
             self._record_success()
+            return runtime_state_notice
         except Exception as e:
             if isinstance(e, _Mem9RuntimeQuotaError):
                 logger.warning("mem9 prefetch quota denied: %s", e)

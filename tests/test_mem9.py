@@ -70,6 +70,7 @@ _Mem9Client = mem9._Mem9Client
 _Mem9RuntimeQuotaError = mem9._Mem9RuntimeQuotaError
 _load_config = mem9._load_config
 _format_memories_block = mem9._format_memories_block
+_format_runtime_state_notice = mem9._format_runtime_state_notice
 _strip_injected_context = mem9._strip_injected_context
 _select_messages = mem9._select_messages
 _extract_user_assistant = mem9._extract_user_assistant
@@ -555,6 +556,33 @@ class TestPrefetch:
         assert "console/claim?key=mem9_test" in result
         assert p._consecutive_failures == 0
 
+    def test_prefetch_returns_runtime_state_notice_once(self):
+        p = Mem9MemoryProvider()
+        p._config = {"api_key": "k", "api_url": "http://localhost"}
+        mock_client = MagicMock()
+        mock_client.runtime_state.return_value = {
+            "mem9ApiKey": {"status": "active"},
+            "meters": [{
+                "meter": "memory_recall_requests",
+                "budgets": [{
+                    "type": "includedQuota",
+                    "state": "warning",
+                    "usage": {"percent": 82, "remaining": 18},
+                    "capacity": {"type": "limited", "value": 100},
+                }],
+            }],
+        }
+        mock_client.search.return_value = {"memories": []}
+        p._client = mock_client
+
+        first = p.prefetch("hello")
+        second = p.prefetch("again")
+
+        assert "mem9 recall is at 82% of its included quota" in first
+        assert second == ""
+        mock_client.runtime_state.assert_called_once()
+        assert mock_client.search.call_count == 2
+
     def test_prefetch_truncates_long_query(self):
         p = Mem9MemoryProvider()
         p._config = {"api_key": "k", "api_url": "http://localhost"}
@@ -618,6 +646,40 @@ class TestFormatMemoriesBlock:
         assert "1. fact one" in block
         assert "2. fact two" in block
         assert "3. fact three" in block
+
+
+class TestFormatRuntimeStateNotice:
+    def test_warning_notice(self):
+        notice = _format_runtime_state_notice({
+            "mem9ApiKey": {"status": "active"},
+            "meters": [{
+                "meter": "memory_recall_requests",
+                "budgets": [{
+                    "type": "includedQuota",
+                    "state": "warning",
+                    "usage": {"percent": 82, "remaining": 18},
+                    "capacity": {"type": "limited", "value": 100},
+                }],
+            }],
+        })
+
+        assert "mem9 recall is at 82% of its included quota" in notice
+        assert "nearing its runtime quota" in notice
+
+    def test_provider_action_notice(self):
+        notice = _format_runtime_state_notice({
+            "recommendedAction": {
+                "providerActionCode": "upgradePlan",
+                "severity": "blocking",
+                "type": "openUrl",
+                "url": BILLING_URL,
+            },
+            "meters": [],
+        })
+
+        assert "runtime account action" in notice
+        assert "upgrade their mem9 plan" in notice
+        assert notice.count(BILLING_URL) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1023,25 @@ class TestClientTimeouts:
             "https://api.mem9.ai/v1alpha2/mem9s/memories",
             params={"q": "theme", "limit": "10"},
             timeout=15.0,
+        )
+
+    def test_runtime_state_uses_public_path(self):
+        mock_http = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"mem9ApiKey": {"status": "active"}, "meters": []}
+        mock_http.get.return_value = mock_resp
+
+        with patch("httpx.Client", return_value=mock_http):
+            client = _Mem9Client(
+                "https://api.mem9.ai",
+                "sk-test",
+                "agent-1",
+            )
+
+        assert client.runtime_state() == {"mem9ApiKey": {"status": "active"}, "meters": []}
+        mock_http.get.assert_called_once_with(
+            "https://api.mem9.ai/v1alpha2/mem9s/runtime-state",
         )
 
     def test_provider_passes_timeout_config_to_client(self, tmp_path):
