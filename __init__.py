@@ -62,8 +62,8 @@ _PRE_COMPRESS_MAX_BYTES = 120_000
 _PRE_COMPRESS_MAX_MESSAGES = 12
 
 _INJECTED_BLOCK_RE = re.compile(
-    r"<(?:relevant-memories|memory-context)>.*?"
-    r"</(?:relevant-memories|memory-context)>",
+    r"<(?:relevant-memories|mem9-status-warning|memory-context)>.*?"
+    r"</(?:relevant-memories|mem9-status-warning|memory-context)>",
     re.DOTALL,
 )
 _QUOTA_CODES = {
@@ -528,6 +528,17 @@ def _format_runtime_state_notice(runtime_state: Any) -> str:
     return f"{message}{_format_runtime_state_action(selected_action)}"
 
 
+def _response_message(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    direct = str(payload.get("message") or "").strip()
+    if direct:
+        return direct
+
+    return _format_runtime_state_notice(payload.get("runtimeState"))
+
+
 def _quota_error_payload(error: _Mem9RuntimeQuotaError, operation: str) -> dict:
     user_message = _format_runtime_quota_notice(error, operation)
     payload = {
@@ -588,8 +599,21 @@ def _format_memories_block(memories: list) -> str:
     return "\n".join(lines)
 
 
+def _format_status_warning_block(message: str) -> str:
+    notice = (message or "").strip()
+    if not notice:
+        return ""
+
+    return "\n".join([
+        "<mem9-status-warning>",
+        f"Mem9 notice for the user: {_escape_for_prompt(notice)}",
+        "Mention this mem9 notice to the user once.",
+        "</mem9-status-warning>",
+    ])
+
+
 def _strip_injected_context(text: str) -> str:
-    """Remove ``<relevant-memories>`` and ``<memory-context>`` blocks
+    """Remove mem9-injected context blocks
     from message content to prevent re-ingesting recalled context."""
     return _INJECTED_BLOCK_RE.sub("", text).strip()
 
@@ -985,6 +1009,7 @@ class Mem9MemoryProvider(MemoryProvider):
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
         self._runtime_state_checked = False
+        self._seen_notice_messages: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -1196,6 +1221,8 @@ class Mem9MemoryProvider(MemoryProvider):
         self._session_id = session_id
         self._agent_id = self._config.get("agent_id", _DEFAULT_AGENT_ID)
         self._agent_context = kwargs.get("agent_context", "")
+        self._runtime_state_checked = False
+        self._seen_notice_messages = set()
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to agent_identity (CLI profile), then agent_id.
         # This value becomes the ``X-Mnemo-Agent-Id`` header used for
@@ -1244,12 +1271,21 @@ class Mem9MemoryProvider(MemoryProvider):
 
     # -- system prompt / prefetch / sync -------------------------------------
 
+    def _consume_notice_message(self, message: str) -> str:
+        notice = (message or "").strip()
+        if not notice or notice in self._seen_notice_messages:
+            return ""
+        self._seen_notice_messages.add(notice)
+        return notice
+
     def _runtime_state_notice_once(self, client: _Mem9Client) -> str:
         if self._runtime_state_checked:
             return ""
         self._runtime_state_checked = True
         try:
-            notice = _format_runtime_state_notice(client.runtime_state())
+            notice = self._consume_notice_message(
+                _format_runtime_state_notice(client.runtime_state()),
+            )
             if notice:
                 logger.info("mem9 runtime-state notice prepared")
             return notice
@@ -1287,26 +1323,30 @@ class Mem9MemoryProvider(MemoryProvider):
         client = self._get_client()
         if not client or self._is_breaker_open() or not query:
             return ""
-        runtime_state_notice = self._runtime_state_notice_once(client)
         try:
             resp = client.search(query[:200], limit=_MAX_INJECT)
+            response_notice = _response_message(resp)
+            runtime_state_notice = self._consume_notice_message(response_notice)
+            if not response_notice:
+                runtime_state_notice = self._runtime_state_notice_once(client)
             memories = resp.get("memories") or []
+            notice_block = _format_status_warning_block(runtime_state_notice)
             if memories:
                 block = _format_memories_block(memories)
                 logger.info("mem9 prefetch: %d memories recalled (%d bytes)",
                             len(memories), len(block))
                 self._record_success()
-                return f"{runtime_state_notice}\n\n{block}" if runtime_state_notice else block
+                return f"{notice_block}\n\n{block}" if notice_block else block
             logger.info("mem9 prefetch: 0 memories (query=%r)", query[:80])
             self._record_success()
-            return runtime_state_notice
+            return notice_block
         except Exception as e:
             if isinstance(e, _Mem9RuntimeQuotaError):
                 logger.warning("mem9 prefetch quota denied: %s", e)
                 return _format_runtime_quota_notice(e, "recall paused")
             self._record_failure()
             logger.warning("mem9 prefetch failed: %s", e)
-            return runtime_state_notice
+            return _format_status_warning_block(self._runtime_state_notice_once(client))
         return ""
 
     def sync_turn(self, user_content: str, assistant_content: str,
@@ -1530,7 +1570,11 @@ class Mem9MemoryProvider(MemoryProvider):
                 content, tags=tags, session_id=self._session_id,
             )
             self._record_success()
-            return json.dumps({"stored": True, "id": result.get("id", "")})
+            payload = {"stored": True, "id": result.get("id", "")}
+            message = _response_message(result)
+            if message:
+                payload["message"] = message
+            return json.dumps(payload)
         except Exception as e:
             if isinstance(e, _Mem9RuntimeQuotaError):
                 return json.dumps(_quota_error_payload(e, "store memory"))
@@ -1548,6 +1592,7 @@ class Mem9MemoryProvider(MemoryProvider):
         try:
             result = self._client.search(query, limit=limit)
             self._record_success()
+            message = _response_message(result)
             memories = result.get("memories") or []
             items = []
             for m in memories:
@@ -1563,8 +1608,14 @@ class Mem9MemoryProvider(MemoryProvider):
                     entry["tags"] = m["tags"]
                 items.append(entry)
             if not items:
-                return json.dumps({"result": "No relevant memories found."})
-            return json.dumps({"results": items, "count": len(items)})
+                payload = {"result": "No relevant memories found."}
+                if message:
+                    payload["message"] = message
+                return json.dumps(payload)
+            payload = {"results": items, "count": len(items)}
+            if message:
+                payload["message"] = message
+            return json.dumps(payload)
         except Exception as e:
             if isinstance(e, _Mem9RuntimeQuotaError):
                 return json.dumps(_quota_error_payload(e, "search memories"))
