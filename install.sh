@@ -40,6 +40,34 @@ require_cmd() {
   have_cmd "$1" || fail "missing required command: $1"
 }
 
+read_plugin_version() {
+  if [ ! -f "$PLUGIN_DIR/plugin.yaml" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+
+  awk -F: '
+    /^[[:space:]]*version:[[:space:]]*/ {
+      value = $2
+      sub(/^[[:space:]]*/, "", value)
+      gsub(/"/, "", value)
+      gsub(/\047/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        print "unknown"
+      }
+    }
+  ' "$PLUGIN_DIR/plugin.yaml"
+}
+
+mem9_plugin_user_agent() {
+  printf 'mem9-plugin/hermes/%s\n' "$(read_plugin_version)"
+}
+
 is_hermes_project_root() {
   local candidate="$1"
   [ -n "$candidate" ] || return 1
@@ -189,6 +217,7 @@ create_api_key() {
       --retry-delay 1 \
       --retry-connrefused \
       -X POST \
+      -H "User-Agent: $(mem9_plugin_user_agent)" \
       "${MEM9_API_URL%/}/v1alpha1/mem9s"
   )"
 
@@ -216,6 +245,7 @@ verify_api_key() {
        --max-time 10 \
        -H "X-API-Key: $key" \
        -H "Content-Type: application/json" \
+       -H "User-Agent: $(mem9_plugin_user_agent)" \
        "${url%/}/v1alpha2/mem9s/memories?q=test&limit=1" >/dev/null 2>&1; then
     success "API key is valid"
     return 0

@@ -80,6 +80,16 @@ CLAIM_URL = "https://console.mem9.ai/console/claim?key=mem9_test"
 BILLING_URL = "https://console.mem9.ai/console/billing/plan"
 
 
+def _plugin_version() -> str:
+    for line in (ROOT / "plugin.yaml").read_text(encoding="utf-8").splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip("'\"")
+    raise AssertionError("plugin version missing")
+
+
+EXPECTED_USER_AGENT = f"mem9-plugin/hermes/{_plugin_version()}"
+
+
 def quota_payload(error: str, runtime_quota=None) -> dict:
     details = {"errorCategory": "runtime_quota_denied"}
     if runtime_quota is not None:
@@ -861,6 +871,7 @@ class TestAutoprovision:
         assert result["id"] == "tenant-abc-123"
         mock_post.assert_called_once_with(
             "https://api.mem9.ai/v1alpha1/mem9s",
+            headers={"User-Agent": EXPECTED_USER_AGENT},
             timeout=8.0,
         )
 
@@ -919,6 +930,7 @@ class TestUserScoping:
         assert client is not None
         assert client._agent_id == "gateway-user-7"
         assert client._http.headers["X-Mnemo-Agent-Id"] == "gateway-user-7"
+        assert client._http.headers["User-Agent"] == EXPECTED_USER_AGENT
         client.close()
 
     def test_different_users_get_different_agent_ids(self):
@@ -931,6 +943,8 @@ class TestUserScoping:
         c1, c2 = p1._get_client(), p2._get_client()
         assert c1._http.headers["X-Mnemo-Agent-Id"] == "alice"
         assert c2._http.headers["X-Mnemo-Agent-Id"] == "bob"
+        assert c1._http.headers["User-Agent"] == EXPECTED_USER_AGENT
+        assert c2._http.headers["User-Agent"] == EXPECTED_USER_AGENT
         c1.close()
         c2.close()
 

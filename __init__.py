@@ -75,6 +75,20 @@ _QUOTA_CODES = {
 }
 
 
+def _read_plugin_version() -> str:
+    plugin_yaml = Path(__file__).resolve().parent / "plugin.yaml"
+    try:
+        for line in plugin_yaml.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("'\"") or "unknown"
+    except OSError:
+        return "unknown"
+    return "unknown"
+
+
+_MEM9_PLUGIN_USER_AGENT = f"mem9-plugin/hermes/{_read_plugin_version()}"
+
+
 def _normalize_timeout_seconds(value: Any, default: float) -> float:
     """Return a safe timeout value in seconds."""
     try:
@@ -664,6 +678,7 @@ class _Mem9Client:
                 "Content-Type": "application/json",
                 "X-API-Key": api_key,
                 "X-Mnemo-Agent-Id": agent_id,
+                "User-Agent": _MEM9_PLUGIN_USER_AGENT,
             },
         )
 
@@ -813,6 +828,7 @@ class _Mem9Client:
 
         resp = httpx.post(
             f"{api_url.rstrip('/')}/v1alpha1/mem9s",
+            headers={"User-Agent": _MEM9_PLUGIN_USER_AGENT},
             timeout=_DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
