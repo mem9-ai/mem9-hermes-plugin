@@ -44,7 +44,6 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
-_MEM9_PLUGIN_USER_AGENT = "mem9-plugin/hermes/0.2.1"
 _RUNTIME_WARNING_PERCENT = 80
 _RUNTIME_URGENT_PERCENT = 95
 
@@ -74,6 +73,20 @@ _QUOTA_CODES = {
     "runtime_access_blocked",
     "runtime_quota_denied",
 }
+
+
+def _read_plugin_version() -> str:
+    plugin_yaml = Path(__file__).resolve().parent / "plugin.yaml"
+    try:
+        for line in plugin_yaml.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("'\"") or "unknown"
+    except OSError:
+        return "unknown"
+    return "unknown"
+
+
+_MEM9_PLUGIN_USER_AGENT = f"mem9-plugin/hermes/{_read_plugin_version()}"
 
 
 def _normalize_timeout_seconds(value: Any, default: float) -> float:

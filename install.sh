@@ -3,11 +3,9 @@
 set -euo pipefail
 
 PLUGIN_NAME="mem9"
-PLUGIN_VERSION="0.2.1"
 PLUGIN_REPO="mem9-ai/mem9-hermes-plugin"
 DEFAULT_API_URL="https://api.mem9.ai"
 DEFAULT_AGENT_ID="hermes"
-MEM9_PLUGIN_USER_AGENT="mem9-plugin/hermes/${PLUGIN_VERSION}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 PLUGIN_DIR="$HERMES_HOME/plugins/$PLUGIN_NAME"
 HERMES_ENV_FILE="$HERMES_HOME/.env"
@@ -40,6 +38,34 @@ have_cmd() {
 
 require_cmd() {
   have_cmd "$1" || fail "missing required command: $1"
+}
+
+read_plugin_version() {
+  if [ ! -f "$PLUGIN_DIR/plugin.yaml" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+
+  awk -F: '
+    /^[[:space:]]*version:[[:space:]]*/ {
+      value = $2
+      sub(/^[[:space:]]*/, "", value)
+      gsub(/"/, "", value)
+      gsub(/\047/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        print "unknown"
+      }
+    }
+  ' "$PLUGIN_DIR/plugin.yaml"
+}
+
+mem9_plugin_user_agent() {
+  printf 'mem9-plugin/hermes/%s\n' "$(read_plugin_version)"
 }
 
 is_hermes_project_root() {
@@ -191,7 +217,7 @@ create_api_key() {
       --retry-delay 1 \
       --retry-connrefused \
       -X POST \
-      -H "User-Agent: $MEM9_PLUGIN_USER_AGENT" \
+      -H "User-Agent: $(mem9_plugin_user_agent)" \
       "${MEM9_API_URL%/}/v1alpha1/mem9s"
   )"
 
@@ -219,7 +245,7 @@ verify_api_key() {
        --max-time 10 \
        -H "X-API-Key: $key" \
        -H "Content-Type: application/json" \
-       -H "User-Agent: $MEM9_PLUGIN_USER_AGENT" \
+       -H "User-Agent: $(mem9_plugin_user_agent)" \
        "${url%/}/v1alpha2/mem9s/memories?q=test&limit=1" >/dev/null 2>&1; then
     success "API key is valid"
     return 0
