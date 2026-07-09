@@ -1,6 +1,6 @@
 manifest_version: 1
 name: mem9
-version: 0.2.1
+version: 0.2.2
 description: "Mem9 - server-side fact extraction, semantic search, and explicit memory CRUD tools."
 # MemoryProvider lifecycle hooks implemented:
 #   on_session_end  — full smart ingest at session boundary

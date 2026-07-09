@@ -71,6 +71,7 @@ _Mem9RuntimeQuotaError = mem9._Mem9RuntimeQuotaError
 _load_config = mem9._load_config
 _format_memories_block = mem9._format_memories_block
 _format_runtime_state_notice = mem9._format_runtime_state_notice
+_response_message = mem9._response_message
 _strip_injected_context = mem9._strip_injected_context
 _select_messages = mem9._select_messages
 _extract_user_assistant = mem9._extract_user_assistant
@@ -235,6 +236,17 @@ class TestToolDispatch:
         assert result["id"] == "mem-123"
         provider._client.store.assert_called_once()
 
+    def test_store_exposes_success_response_message(self, provider):
+        provider._client.store.return_value = {
+            "id": "mem-123",
+            "message": "mem9 memory saving has used 80% of included quota.",
+        }
+        result = json.loads(provider.handle_tool_call(
+            "mem9_store", {"content": "User prefers dark mode"},
+        ))
+        assert result["stored"] is True
+        assert result["message"] == "mem9 memory saving has used 80% of included quota."
+
     def test_store_missing_content(self, provider):
         result = json.loads(provider.handle_tool_call("mem9_store", {}))
         assert "error" in result
@@ -253,6 +265,20 @@ class TestToolDispatch:
         assert result["count"] == 1
         assert result["results"][0]["content"] == "dark mode"
         assert result["results"][0]["age"] == "2h ago"
+
+    def test_search_exposes_success_response_message(self, provider):
+        provider._client.search.return_value = {
+            "memories": [
+                {"id": "m1", "content": "dark mode"},
+            ],
+            "total": 1,
+            "message": "mem9 recall has used 80% of included quota.",
+        }
+        result = json.loads(provider.handle_tool_call(
+            "mem9_search", {"query": "theme"},
+        ))
+        assert result["count"] == 1
+        assert result["message"] == "mem9 recall has used 80% of included quota."
 
     def test_search_runtime_quota_denied(self, provider):
         provider._client.search.side_effect = _Mem9RuntimeQuotaError(
@@ -528,6 +554,25 @@ class TestPrefetch:
         p._client = mock_client
         assert p.prefetch("hello") == ""
 
+    def test_prefetch_injects_success_response_message_without_memories_once(self):
+        p = Mem9MemoryProvider()
+        p._config = {"api_key": "k", "api_url": "http://localhost"}
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "memories": [],
+            "message": "mem9 recall has used 80% of included quota.",
+        }
+        p._client = mock_client
+
+        first = p.prefetch("hello")
+        second = p.prefetch("again")
+
+        assert "<mem9-status-warning>" in first
+        assert "mem9 recall has used 80% of included quota." in first
+        assert "Mention this mem9 notice to the user once." in first
+        assert second == ""
+        mock_client.runtime_state.assert_not_called()
+
     def test_prefetch_empty_query_skips_search(self):
         p = Mem9MemoryProvider()
         p._config = {"api_key": "k", "api_url": "http://localhost"}
@@ -731,6 +776,34 @@ class TestFormatRuntimeStateNotice:
         assert "rerun mem9 setup or create a new mem9 API key" in notice
 
 
+class TestResponseMessage:
+    def test_prefers_success_message(self):
+        message = _response_message({
+            "message": "mem9 recall has used 80% of included quota.",
+            "runtimeState": {"mem9ApiKey": {"status": "inactive"}},
+        })
+
+        assert message == "mem9 recall has used 80% of included quota."
+
+    def test_falls_back_to_runtime_state(self):
+        message = _response_message({
+            "runtimeState": {
+                "mem9ApiKey": {"status": "active"},
+                "meters": [{
+                    "meter": "memory_recall_requests",
+                    "budgets": [{
+                        "type": "includedQuota",
+                        "state": "warning",
+                        "usage": {"percent": 82, "remaining": 18},
+                        "capacity": {"type": "limited", "value": 100},
+                    }],
+                }],
+            },
+        })
+
+        assert "mem9 recall is at 82% of its included quota" in message
+
+
 # ---------------------------------------------------------------------------
 # Strip injected context
 # ---------------------------------------------------------------------------
@@ -742,6 +815,10 @@ class TestStripInjectedContext:
 
     def test_strip_memory_context(self):
         text = "pre <memory-context>injected</memory-context> post"
+        assert _strip_injected_context(text) == "pre  post"
+
+    def test_strip_status_warning(self):
+        text = "pre <mem9-status-warning>hidden</mem9-status-warning> post"
         assert _strip_injected_context(text) == "pre  post"
 
     def test_strip_nested_blocks(self):
