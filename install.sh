@@ -3,9 +3,11 @@
 set -euo pipefail
 
 PLUGIN_NAME="mem9"
+PLUGIN_VERSION="0.2.1"
 PLUGIN_REPO="mem9-ai/mem9-hermes-plugin"
 DEFAULT_API_URL="https://api.mem9.ai"
 DEFAULT_AGENT_ID="hermes"
+MEM9_PLUGIN_USER_AGENT="mem9-plugin/hermes/${PLUGIN_VERSION}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 PLUGIN_DIR="$HERMES_HOME/plugins/$PLUGIN_NAME"
 HERMES_ENV_FILE="$HERMES_HOME/.env"
@@ -189,6 +191,7 @@ create_api_key() {
       --retry-delay 1 \
       --retry-connrefused \
       -X POST \
+      -H "User-Agent: $MEM9_PLUGIN_USER_AGENT" \
       "${MEM9_API_URL%/}/v1alpha1/mem9s"
   )"
 
@@ -216,6 +219,7 @@ verify_api_key() {
        --max-time 10 \
        -H "X-API-Key: $key" \
        -H "Content-Type: application/json" \
+       -H "User-Agent: $MEM9_PLUGIN_USER_AGENT" \
        "${url%/}/v1alpha2/mem9s/memories?q=test&limit=1" >/dev/null 2>&1; then
     success "API key is valid"
     return 0

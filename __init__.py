@@ -44,6 +44,7 @@ _DEFAULT_API_URL = "https://api.mem9.ai"
 _DEFAULT_AGENT_ID = "hermes"
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 _DEFAULT_SEARCH_TIMEOUT_SECONDS = 15.0
+_MEM9_PLUGIN_USER_AGENT = "mem9-plugin/hermes/0.2.1"
 _RUNTIME_WARNING_PERCENT = 80
 _RUNTIME_URGENT_PERCENT = 95
 
@@ -664,6 +665,7 @@ class _Mem9Client:
                 "Content-Type": "application/json",
                 "X-API-Key": api_key,
                 "X-Mnemo-Agent-Id": agent_id,
+                "User-Agent": _MEM9_PLUGIN_USER_AGENT,
             },
         )
 
@@ -813,6 +815,7 @@ class _Mem9Client:
 
         resp = httpx.post(
             f"{api_url.rstrip('/')}/v1alpha1/mem9s",
+            headers={"User-Agent": _MEM9_PLUGIN_USER_AGENT},
             timeout=_DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()

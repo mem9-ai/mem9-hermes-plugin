@@ -861,6 +861,7 @@ class TestAutoprovision:
         assert result["id"] == "tenant-abc-123"
         mock_post.assert_called_once_with(
             "https://api.mem9.ai/v1alpha1/mem9s",
+            headers={"User-Agent": "mem9-plugin/hermes/0.2.1"},
             timeout=8.0,
         )
 
@@ -919,6 +920,7 @@ class TestUserScoping:
         assert client is not None
         assert client._agent_id == "gateway-user-7"
         assert client._http.headers["X-Mnemo-Agent-Id"] == "gateway-user-7"
+        assert client._http.headers["User-Agent"] == "mem9-plugin/hermes/0.2.1"
         client.close()
 
     def test_different_users_get_different_agent_ids(self):
@@ -931,6 +933,8 @@ class TestUserScoping:
         c1, c2 = p1._get_client(), p2._get_client()
         assert c1._http.headers["X-Mnemo-Agent-Id"] == "alice"
         assert c2._http.headers["X-Mnemo-Agent-Id"] == "bob"
+        assert c1._http.headers["User-Agent"] == "mem9-plugin/hermes/0.2.1"
+        assert c2._http.headers["User-Agent"] == "mem9-plugin/hermes/0.2.1"
         c1.close()
         c2.close()
 
