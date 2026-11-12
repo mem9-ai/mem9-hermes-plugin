@@ -50,6 +50,16 @@ hermes plugins update mem9
 
 This runs `git pull` inside the installed plugin directory. Start a new Hermes session to pick up the changes. Your `.env` and `mem9.json` are not touched.
 
+For installations created before credential-file hardening, also restrict the existing file:
+
+```bash
+chmod 600 "${HERMES_HOME:-$HOME/.hermes}/.env"
+```
+
+Updating the plugin does not rotate an existing key. If a key was exposed, contact
+the operator of your mem9 service to disable the affected credential or Space;
+creating a new Space alone does not revoke the old key.
+
 If the symlink is missing after an upgrade (e.g. Hermes was reinstalled), re-run:
 
 ```bash
@@ -84,6 +94,26 @@ All files live under `${HERMES_HOME:-$HOME/.hermes}/`.
 | `agent_id` | Agent identifier (default: `hermes`) |
 | `default_timeout_seconds` | General request timeout (default: 8) |
 | `search_timeout_seconds` | Search/recall timeout (default: 15) |
+
+## Security boundaries
+
+An API key grants access to its Space's shared memories, including memories from
+other sessions and agents using that key. `agent_id`, `session_id`, and
+`X-Mnemo-Agent-Id` identify sources and callers; they are not authorization
+boundaries. Use separate Spaces and keys for users or agents that must not share
+access. Providers are initialized for one agent instance; reusing one initialized
+provider across different identities is unsupported.
+
+The model can call memory update and delete tools without a separate human
+confirmation. Enable the plugin only for agents trusted to manage that Space.
+The mem9 server soft-deletes memory records, but this plugin does not provide an
+undo command or a complete audit trail. A self-hosted server controls its own
+deletion and retention behavior.
+
+Server URLs must use HTTPS, except HTTP on `localhost` or a loopback IP for local
+development. Custom HTTPS endpoints remain supported: configure only a server
+you trust with your API key and conversation content. The installer does not
+follow redirects when provisioning or verifying a key.
 
 ## Uninstall
 
