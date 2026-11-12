@@ -26,10 +26,12 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
@@ -671,15 +673,55 @@ def _select_messages(
 # REST client
 # ---------------------------------------------------------------------------
 
+def _validate_api_url(api_url: str) -> str:
+    """Allow HTTPS servers and loopback HTTP for local development."""
+    import ipaddress
+
+    url = api_url.strip().rstrip("/")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in url):
+        raise ValueError("mem9 API URL contains invalid characters")
+    parsed = urlsplit(url)
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ValueError("mem9 API URL must have a host and no embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("mem9 API URL must not contain a query or fragment")
+    parsed.port  # Validate the port before making any request.
+    loopback = parsed.hostname == "localhost"
+    try:
+        loopback = loopback or ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        pass
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+        raise ValueError("mem9 API URL requires HTTPS (HTTP is allowed only on loopback)")
+    return url
+
+
+def _write_credentials(env_path: Path, values: dict) -> None:
+    """Replace credentials atomically without exposing a readable staging file."""
+    for key, value in values.items():
+        if any(c in value for c in "\r\n\0"):
+            raise ValueError(f"Invalid credential value for {key}")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    lines = [line for line in lines if line.partition("=")[0].strip() not in values]
+    lines.extend(f"{key}={value}" for key, value in values.items())
+    fd, tmp = tempfile.mkstemp(prefix=f".{env_path.name}.", dir=env_path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write("\n".join(lines) + "\n")
+        os.replace(tmp, env_path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 class _Mem9Client:
     """Lightweight REST client for the mem9 v1alpha2 API.
 
     Uses ``httpx`` (already a core dependency) for HTTP.  All methods are
     synchronous — background threading is handled by the provider layer.
 
-        The provider sends ``X-Mnemo-Agent-Id`` with each request.
-        Per-user isolation works by setting that header to a user-specific
-        value (see ``Mem9MemoryProvider``).
+    ``X-API-Key`` selects the shared Space. ``X-Mnemo-Agent-Id`` identifies
+    the caller for attribution; it is not a per-user authorization boundary.
     """
 
     def __init__(self, api_url: str, api_key: str, agent_id: str,
@@ -687,7 +729,7 @@ class _Mem9Client:
                  search_timeout_seconds: float = _DEFAULT_SEARCH_TIMEOUT_SECONDS):
         import httpx
 
-        self._base = api_url.rstrip("/")
+        self._base = _validate_api_url(api_url)
         self._api_key = api_key
         self._agent_id = agent_id
         self._default_timeout_seconds = _normalize_timeout_seconds(
@@ -851,7 +893,7 @@ class _Mem9Client:
         import httpx
 
         resp = httpx.post(
-            f"{api_url.rstrip('/')}/v1alpha1/mem9s",
+            f"{_validate_api_url(api_url)}/v1alpha1/mem9s",
             headers={"User-Agent": _MEM9_PLUGIN_USER_AGENT},
             timeout=_DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
@@ -1062,7 +1104,7 @@ class Mem9MemoryProvider(MemoryProvider):
         import sys
 
         from hermes_cli.config import save_config
-        from hermes_cli.memory_setup import _curses_select, _write_env_vars
+        from hermes_cli.memory_setup import _curses_select
 
         print("\n  Configuring mem9 memory:\n")
 
@@ -1113,7 +1155,7 @@ class Mem9MemoryProvider(MemoryProvider):
                     print("  ✗ Provisioning failed: no tenant ID returned.")
                     return
                 env_writes["MEM9_API_KEY"] = api_key
-                print(f"  ✓ Tenant created: {api_key[:12]}...")
+                print("  ✓ Tenant created")
             except Exception as e:
                 print(f"  ✗ Provisioning failed: {e}")
                 print("  Try manual setup or check https://mem9.ai")
@@ -1179,7 +1221,9 @@ class Mem9MemoryProvider(MemoryProvider):
             self.save_config(provider_config, hermes_home)
 
         if env_writes:
-            _write_env_vars(env_path, env_writes)
+            _write_credentials(env_path, env_writes)
+        elif env_path.exists():
+            env_path.chmod(0o600)
 
         print(f"\n  ✓ mem9 activated")
         if env_writes:
@@ -1223,10 +1267,10 @@ class Mem9MemoryProvider(MemoryProvider):
         self._agent_context = kwargs.get("agent_context", "")
         self._runtime_state_checked = False
         self._seen_notice_messages = set()
-        # Prefer gateway-provided user_id for per-user memory scoping;
+        # Prefer gateway-provided user_id for caller attribution;
         # fall back to agent_identity (CLI profile), then agent_id.
-        # This value becomes the ``X-Mnemo-Agent-Id`` header used for
-        # per-user memory scoping.
+        # This becomes the ``X-Mnemo-Agent-Id`` attribution header.
+        # The API key, not this header, selects the shared Space.
         self._user_id = (
             kwargs.get("user_id")
             or kwargs.get("agent_identity")

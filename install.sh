@@ -173,33 +173,56 @@ upsert_env_value() {
   local key="$1"
   local value="$2"
   local file="$3"
-  local tmp_file
 
-  mkdir -p "$(dirname "$file")"
-  tmp_file="${file}.tmp.$$"
+  printf '%s' "$value" | "$hermes_python" -c '
+import os
+from pathlib import Path
+import sys
+import tempfile
 
-  if [ -f "$file" ]; then
-    awk -v key="$key" -v value="$value" '
-      BEGIN { updated = 0 }
-      index($0, key "=") == 1 {
-        if (!updated) {
-          print key "=" value
-          updated = 1
-        }
-        next
-      }
-      { print }
-      END {
-        if (!updated) {
-          print key "=" value
-        }
-      }
-    ' "$file" >"$tmp_file"
-  else
-    printf '%s=%s\n' "$key" "$value" >"$tmp_file"
-  fi
+key, file = sys.argv[1:]
+value = sys.stdin.read()
+if any(c in value for c in "\r\n\0"):
+    raise SystemExit("invalid credential value")
+path = Path(file)
+path.parent.mkdir(parents=True, exist_ok=True)
+lines = path.read_text().splitlines() if path.exists() else []
+lines = [line for line in lines if line.partition("=")[0].strip() != key]
+lines.append(f"{key}={value}")
+fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w") as stream:
+        stream.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+finally:
+    Path(tmp).unlink(missing_ok=True)
+' "$key" "$file"
+}
 
-  mv "$tmp_file" "$file"
+validate_api_url() {
+  "$hermes_python" - "$MEM9_API_URL" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1].strip().rstrip("/")
+if any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in url):
+    raise SystemExit("mem9 API URL contains invalid characters")
+parsed = urlsplit(url)
+if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+    raise SystemExit("mem9 API URL must have a host and no embedded credentials")
+if parsed.query or parsed.fragment:
+    raise SystemExit("mem9 API URL must not contain a query or fragment")
+parsed.port
+loopback = parsed.hostname == "localhost"
+try:
+    loopback = loopback or ipaddress.ip_address(parsed.hostname).is_loopback
+except ValueError:
+    pass
+if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+    raise SystemExit("mem9 API URL requires HTTPS (HTTP is allowed only on loopback)")
+print(url)
+PY
 }
 
 create_api_key() {
@@ -208,9 +231,9 @@ create_api_key() {
   require_cmd curl
   require_cmd python3
 
-  info "creating a new mem9 API key"
+  info "creating a new mem9 API key" >&2
   response="$(
-    curl -fsSL \
+    curl -fsS \
       --connect-timeout 5 \
       --max-time 20 \
       --retry 2 \
@@ -236,17 +259,25 @@ print(api_key)
 verify_api_key() {
   local key="$1"
   local url="$2"
+  local status
+
+  case "$key" in
+    *$'\r'*|*$'\n'*) return 1 ;;
+  esac
 
   require_cmd curl
 
   info "verifying API key connectivity"
-  if curl -fsSL \
+  if status="$(printf 'X-API-Key: %s\n' "$key" | curl -fsS \
        --connect-timeout 5 \
        --max-time 10 \
-       -H "X-API-Key: $key" \
+       -H @- \
        -H "Content-Type: application/json" \
        -H "User-Agent: $(mem9_plugin_user_agent)" \
-       "${url%/}/v1alpha2/mem9s/memories?q=test&limit=1" >/dev/null 2>&1; then
+       --output /dev/null \
+       --write-out '%{http_code}' \
+       "${url%/}/v1alpha2/mem9s/memories?q=test&limit=1" 2>/dev/null)" \
+       && [[ "$status" == 2?? ]]; then
     success "API key is valid"
     return 0
   else
@@ -388,13 +419,13 @@ done
 
 have_cmd hermes || fail "hermes command is required; install Hermes first"
 
-install_args=()
+install_args=("$PLUGIN_REPO")
 if [ "$FORCE_INSTALL" = "1" ]; then
   install_args+=("--force")
 fi
 
 info "installing mem9 via hermes plugins install"
-HERMES_HOME="$HERMES_HOME" hermes plugins install "$PLUGIN_REPO" "${install_args[@]}"
+HERMES_HOME="$HERMES_HOME" hermes plugins install "${install_args[@]}"
 
 [ -f "$PLUGIN_DIR/__init__.py" ] || fail "installed plugin is missing __init__.py"
 [ -f "$PLUGIN_DIR/plugin.yaml" ] || fail "installed plugin is missing plugin.yaml"
@@ -410,6 +441,7 @@ existing_api_url="${existing_api_url_env:-$existing_api_url_file}"
 if [ -z "$MEM9_API_URL" ]; then
   MEM9_API_URL="${existing_api_url:-$DEFAULT_API_URL}"
 fi
+MEM9_API_URL="$(validate_api_url)" || fail "invalid MEM9_API_URL"
 
 existing_agent_id_env="$(read_env_value "MEM9_AGENT_ID" "$HERMES_ENV_FILE")"
 existing_agent_id_file="$(read_json_value "agent_id" "$MEM9_CONFIG_FILE" "$hermes_python")"
